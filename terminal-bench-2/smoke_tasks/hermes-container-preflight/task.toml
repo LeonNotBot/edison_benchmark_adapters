@@ -1,0 +1,19 @@
+schema_version = "1.3"
+
+[task]
+name = "edison/hermes-container-preflight"
+description = "Minimal Edison smoke task to verify Harbor/Docker/Hermes can call the configured model and execute a shell action inside the trial container."
+
+[[task.authors]]
+name = "Edison"
+
+[environment]
+docker_image = "python:3.12-slim"
+network_mode = "public"
+
+[agent]
+timeout_sec = 120
+
+[verifier]
+timeout_sec = 60
+environment_mode = "shared"
