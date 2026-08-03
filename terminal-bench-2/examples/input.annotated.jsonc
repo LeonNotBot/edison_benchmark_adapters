@@ -58,8 +58,8 @@
     // 模型标识；会传给 Harbor agent，也会用于模型 API 预检。
     "model_identifier": "anthropic/claude-sonnet-4-6",
 
-    // 模型 API endpoint；样例里是占位，真实测试前要替换。
-    "api_endpoint": "https://example.com/v1",
+    // 模型 API endpoint；可以写真实 URL，也可以写环境变量名，比如 ANTHROPIC_BASE_URL。
+    "api_endpoint": "ANTHROPIC_BASE_URL",
 
     // 说明本地自测时应该从哪个环境变量读取 key；真实 key 不要写进样例文件。
     "api_key_env": "ANTHROPIC_API_KEY"

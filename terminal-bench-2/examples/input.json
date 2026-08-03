@@ -21,7 +21,7 @@
     "provider": "anthropic",
     "normalized_provider": "anthropic",
     "model_identifier": "anthropic/claude-sonnet-4-6",
-    "api_endpoint": "https://example.com/v1",
+    "api_endpoint": "ANTHROPIC_BASE_URL",
     "api_key_env": "ANTHROPIC_API_KEY"
   },
   "paths": {

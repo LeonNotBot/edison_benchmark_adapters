@@ -127,6 +127,37 @@ def env_value(*names: str) -> str:
     return ""
 
 
+def resolve_env_reference(value: Any) -> str:
+    """Resolve a config value that may be a literal or an environment variable name.
+
+    Edison passes real endpoints in normal runs. For local/worker self-tests,
+    examples may use values like ``ANTHROPIC_BASE_URL`` or ``${ANTHROPIC_BASE_URL}``
+    so secrets and deployment-specific URLs can stay in the shell environment.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.fullmatch(r"\$\{([^}]+)\}", raw) or re.fullmatch(r"\$([A-Za-z_][A-Za-z0-9_]*)", raw)
+    if match:
+        return os.environ.get(match.group(1), "")
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", raw) and os.environ.get(raw):
+        return os.environ[raw]
+    return raw
+
+
+def model_endpoint(model: dict[str, Any]) -> str:
+    endpoint = resolve_env_reference(model.get("api_endpoint"))
+    return endpoint or os.environ.get("EDISON_MODEL_API_ENDPOINT", "")
+
+
+def model_api_key(model: dict[str, Any], *fallback_env_names: str) -> str:
+    explicit_env_name = str(model.get("api_key_env") or "").strip()
+    names = [explicit_env_name] if explicit_env_name else []
+    names.extend(fallback_env_names)
+    names.append("EDISON_MODEL_API_KEY")
+    return env_value(*names)
+
+
 def truthy(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -199,8 +230,8 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
     provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
     model_identifier = str(model.get("model_identifier") or "").strip()
     request_model = api_model_id(model_identifier, provider)
-    endpoint = str(model.get("api_endpoint") or os.environ.get("EDISON_MODEL_API_ENDPOINT") or "").strip().rstrip("/")
-    api_key = env_value("EDISON_MODEL_API_KEY")
+    endpoint = model_endpoint(model).strip().rstrip("/")
+    api_key = model_api_key(model)
     timeout = float(params.get("model_preflight_timeout_seconds") or 30)
     started = time.monotonic()
 
@@ -212,7 +243,7 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
         raise RuntimeError("model preflight failed: missing api_endpoint")
 
     if provider == "anthropic":
-        api_key = env_value("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "EDISON_MODEL_API_KEY")
+        api_key = model_api_key(model, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
         if not api_key:
             raise RuntimeError("model preflight failed: missing ANTHROPIC_API_KEY")
         base = re.sub(r"/v1$", "", endpoint)
@@ -233,9 +264,9 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
         )
     elif provider in {"openai", "openrouter"}:
         if provider == "openrouter":
-            api_key = env_value("OPENROUTER_API_KEY", "EDISON_MODEL_API_KEY")
+            api_key = model_api_key(model, "OPENROUTER_API_KEY")
         else:
-            api_key = env_value("OPENAI_API_KEY", "EDISON_MODEL_API_KEY")
+            api_key = model_api_key(model, "OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError(f"model preflight failed: missing {provider.upper()} API key")
         base = endpoint.rstrip("/")
@@ -272,30 +303,30 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
 
 def append_model_env(command: list[str], model: dict[str, Any]) -> None:
     provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
-    endpoint = str(model.get("api_endpoint") or os.environ.get("EDISON_MODEL_API_ENDPOINT") or "").strip()
+    endpoint = model_endpoint(model).strip()
 
     if provider == "anthropic":
-        api_key = env_value("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "EDISON_MODEL_API_KEY")
+        api_key = model_api_key(model, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
         if api_key:
             command.extend(["--ae", f"ANTHROPIC_API_KEY={api_key}"])
         if endpoint:
             endpoint = re.sub(r"/v1$", "", endpoint.rstrip("/"))
             command.extend(["--ae", f"ANTHROPIC_BASE_URL={endpoint}"])
     elif provider == "openrouter":
-        api_key = env_value("OPENROUTER_API_KEY", "EDISON_MODEL_API_KEY")
+        api_key = model_api_key(model, "OPENROUTER_API_KEY")
         if api_key:
             command.extend(["--ae", f"OPENROUTER_API_KEY={api_key}"])
         if endpoint:
             command.extend(["--ae", f"OPENROUTER_BASE_URL={endpoint}"])
     elif provider == "openai":
-        api_key = env_value("OPENAI_API_KEY", "EDISON_MODEL_API_KEY")
+        api_key = model_api_key(model, "OPENAI_API_KEY")
         if api_key:
             command.extend(["--ae", f"OPENAI_API_KEY={api_key}"])
         if endpoint:
             command.extend(["--ae", f"OPENAI_BASE_URL={endpoint}"])
     elif provider:
         prefix = provider.upper().replace("-", "_")
-        api_key = env_value(f"{prefix}_API_KEY", "EDISON_MODEL_API_KEY")
+        api_key = model_api_key(model, f"{prefix}_API_KEY")
         if api_key:
             command.extend(["--ae", f"{prefix}_API_KEY={api_key}"])
         if endpoint:
@@ -339,11 +370,11 @@ def append_common_harbor_options(command: list[str], *, params: dict[str, Any], 
 def model_env_templates(model: dict[str, Any]) -> dict[str, str]:
     """Return Harbor config env entries that resolve real secrets from the adapter process env."""
     provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
-    endpoint = str(model.get("api_endpoint") or os.environ.get("EDISON_MODEL_API_ENDPOINT") or "").strip()
+    endpoint = model_endpoint(model).strip()
     env: dict[str, str] = {}
 
     if provider == "anthropic":
-        if env_value("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "EDISON_MODEL_API_KEY"):
+        if model_api_key(model, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
             env["ANTHROPIC_API_KEY"] = "${ANTHROPIC_API_KEY}"
             env["ANTHROPIC_TOKEN"] = "${ANTHROPIC_API_KEY}"
         if env_value("ANTHROPIC_AUTH_TOKEN"):
@@ -351,19 +382,19 @@ def model_env_templates(model: dict[str, Any]) -> dict[str, str]:
         if endpoint:
             env["ANTHROPIC_BASE_URL"] = re.sub(r"/v1$", "", endpoint.rstrip("/"))
     elif provider == "openrouter":
-        if env_value("OPENROUTER_API_KEY", "EDISON_MODEL_API_KEY"):
+        if model_api_key(model, "OPENROUTER_API_KEY"):
             env["OPENROUTER_API_KEY"] = "${OPENROUTER_API_KEY}"
         if endpoint:
             env["OPENROUTER_BASE_URL"] = endpoint
     elif provider == "openai":
-        if env_value("OPENAI_API_KEY", "EDISON_MODEL_API_KEY"):
+        if model_api_key(model, "OPENAI_API_KEY"):
             env["OPENAI_API_KEY"] = "${OPENAI_API_KEY}"
         if endpoint:
             env["OPENAI_BASE_URL"] = endpoint
             env["OPENAI_API_BASE"] = endpoint
     elif provider:
         prefix = provider.upper().replace("-", "_")
-        if env_value(f"{prefix}_API_KEY", "EDISON_MODEL_API_KEY"):
+        if model_api_key(model, f"{prefix}_API_KEY"):
             env[f"{prefix}_API_KEY"] = f"${{{prefix}_API_KEY}}"
         if endpoint:
             env[f"{prefix}_BASE_URL"] = endpoint
