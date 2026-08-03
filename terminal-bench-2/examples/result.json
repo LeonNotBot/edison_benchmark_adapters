@@ -1,0 +1,58 @@
+{
+  "protocol_version": "edison.external_benchmark.v1",
+  "adapter": "terminal-bench-2",
+  "benchmark": "terminal-bench/terminal-bench-2",
+  "suite": "terminal-bench/terminal-bench-2",
+  "agent": "terminus-2",
+  "model": "anthropic/claude-sonnet-4-6",
+  "run_id": "2026-07-30__15-04-26",
+  "status": "completed",
+  "score": 1.0,
+  "pass_rate": 1.0,
+  "sample_count": 1,
+  "metrics": {
+    "duration_seconds": 679.0,
+    "harbor_result_path": "./tmp/local-tb2-smoke/output/harbor_jobs/2026-07-30__15-04-26/result.json",
+    "harbor_returncode": 0,
+    "harbor_stdout_tail": "terminal-bench/terminal-bench-2 • terminus-2 • claude-sonnet-4-6\nMean: 1.000\n",
+    "harbor_stderr_tail": "",
+    "harbor_stats": {
+      "n_completed_trials": 1,
+      "n_errored_trials": 0,
+      "n_running_trials": 0,
+      "n_pending_trials": 0,
+      "n_cancelled_trials": 0,
+      "n_retries": 0,
+      "evals": {},
+      "n_input_tokens": null,
+      "n_cache_tokens": null,
+      "n_output_tokens": null,
+      "cost_usd": null
+    }
+  },
+  "samples": [
+    {
+      "id": "terminal-bench/fix-git",
+      "name": "fix-git",
+      "status": "completed",
+      "score": 1.0,
+      "reward": 1.0,
+      "output": "Task completed successfully.",
+      "latency_seconds": 679.0,
+      "metrics": {
+        "trial_name": "fix-git__example",
+        "source": "terminal-bench/terminal-bench-2",
+        "agent_info": {
+          "name": "terminus-2"
+        },
+        "verifier_result": {
+          "rewards": {
+            "reward": 1.0
+          }
+        }
+      },
+      "error": null
+    }
+  ],
+  "error": null
+}

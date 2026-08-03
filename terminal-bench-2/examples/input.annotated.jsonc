@@ -1,0 +1,82 @@
+{
+  // Edison 任务 ID；本地 smoke 测试时可以随便填，正式运行时由 Edison 生成。
+  "task_id": "local-tb2-smoke",
+
+  // 人类可读的任务名称；主要用于日志和排查。
+  "task_name": "Terminal-Bench 2 local smoke",
+
+  // benchmark 运行配置；Edison 会把前端选择的 benchmark 参数放在这里。
+  "benchmark": {
+    // adapter 名称；Edison 用它找到对应的 adapter 目录。
+    "adapter": "terminal-bench-2",
+
+    // Harbor / Terminal-Bench 使用的数据集名称或本地数据集路径。
+    "suite": "terminal-bench/terminal-bench-2",
+
+    // Harbor agent 名称；当前支持 oracle、hermes、terminus-2。
+    "agent": "terminus-2",
+
+    // 指定 TB2 题目短名；留空时由 Harbor / TB2 按 limit 抽题。
+    "task_names": "fix-git",
+
+    // 取多少道题；如果 task_names 指定了 2 道题，limit=20 也只会跑这 2 道。
+    "limit": 1,
+
+    // 并发 trial 数；1 表示串行执行，更容易观察和调试。
+    "runs": 1,
+
+    // adapter 透传给 Harbor 或预检逻辑的扩展参数。
+    "params": {
+      // 正式跑 Harbor / Docker / TB2 前，先在 worker 侧轻量请求一次模型 API。
+      "model_preflight": true,
+
+      // 模型 API 预检最长等待秒数。
+      "model_preflight_timeout_seconds": 30,
+
+      // 是否额外启动一个容器内 Hermes smoke task；当前主要用于 Hermes 调试。
+      "container_agent_preflight": false,
+
+      // 是否保留 Harbor / Docker 运行产物；true 便于失败后查看 job.log、trial.log。
+      "no_delete": true,
+
+      // agent 做题超时倍率；TB2 的单题超时较长，真实模型建议先用 2。
+      "agent_timeout_multiplier": 2,
+
+      // agent 安装/初始化超时倍率；Hermes 安装较慢时需要更大值。
+      "agent_setup_timeout_multiplier": 10
+    }
+  },
+
+  // 模型版本配置；正式运行时来自 Edison 模型管理页面。
+  "model": {
+    // Edison 侧 provider；adapter 会归一化成 Harbor / agent 能理解的 provider。
+    "provider": "anthropic",
+
+    // 已归一化 provider；通常由 Edison 后端补充，手写样例时可与 provider 一致。
+    "normalized_provider": "anthropic",
+
+    // 模型标识；会传给 Harbor agent，也会用于模型 API 预检。
+    "model_identifier": "anthropic/claude-sonnet-4-6",
+
+    // 模型 API endpoint；样例里是占位，真实测试前要替换。
+    "api_endpoint": "https://example.com/v1",
+
+    // 说明本地自测时应该从哪个环境变量读取 key；真实 key 不要写进样例文件。
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+
+  // Edison 和 adapter 约定的输入输出路径。
+  "paths": {
+    // 当前 Edison 任务的临时运行目录；存 input.json、progress.json 等。
+    "run_dir": "./tmp/local-tb2-smoke/run",
+
+    // adapter 输出目录；通常包含 Harbor jobs、最终 result.json 等。
+    "output_dir": "./tmp/local-tb2-smoke/output",
+
+    // adapter 必须写入的 Edison 标准结果文件。
+    "result_json": "./tmp/local-tb2-smoke/output/result.json",
+
+    // adapter 运行过程中持续写入的进度快照；Edison 后端会读取并同步到页面。
+    "progress_json": "./tmp/local-tb2-smoke/run/progress.json"
+  }
+}

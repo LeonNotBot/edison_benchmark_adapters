@@ -1,0 +1,33 @@
+{
+  "task_id": "local-tb2-smoke",
+  "task_name": "Terminal-Bench 2 local smoke",
+  "benchmark": {
+    "adapter": "terminal-bench-2",
+    "suite": "terminal-bench/terminal-bench-2",
+    "agent": "terminus-2",
+    "task_names": "fix-git",
+    "limit": 1,
+    "runs": 1,
+    "params": {
+      "model_preflight": true,
+      "model_preflight_timeout_seconds": 30,
+      "container_agent_preflight": false,
+      "no_delete": true,
+      "agent_timeout_multiplier": 2,
+      "agent_setup_timeout_multiplier": 10
+    }
+  },
+  "model": {
+    "provider": "anthropic",
+    "normalized_provider": "anthropic",
+    "model_identifier": "anthropic/claude-sonnet-4-6",
+    "api_endpoint": "https://example.com/v1",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+  "paths": {
+    "run_dir": "./tmp/local-tb2-smoke/run",
+    "output_dir": "./tmp/local-tb2-smoke/output",
+    "result_json": "./tmp/local-tb2-smoke/output/result.json",
+    "progress_json": "./tmp/local-tb2-smoke/run/progress.json"
+  }
+}

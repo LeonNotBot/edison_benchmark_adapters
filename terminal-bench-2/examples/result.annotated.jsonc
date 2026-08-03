@@ -1,0 +1,113 @@
+{
+  // Edison 外部 benchmark 标准协议版本；后端用它识别结果格式。
+  "protocol_version": "edison.external_benchmark.v1",
+
+  // 产出该结果的 adapter 名称。
+  "adapter": "terminal-bench-2",
+
+  // benchmark 名称；通常等于 suite。
+  "benchmark": "terminal-bench/terminal-bench-2",
+
+  // benchmark 数据集或 suite；用于页面展示和后续矩阵聚合。
+  "suite": "terminal-bench/terminal-bench-2",
+
+  // 本次运行使用的 agent。
+  "agent": "terminus-2",
+
+  // 本次运行使用的模型标识。
+  "model": "anthropic/claude-sonnet-4-6",
+
+  // Harbor job ID 或 job 目录名；用于追溯原始结果。
+  "run_id": "2026-07-30__15-04-26",
+
+  // adapter 归一化后的状态；completed 表示执行链路正常结束，error 表示存在基础设施或样本异常。
+  "status": "completed",
+
+  // 汇总得分；TB2 里通常是 reward mean，范围 0-1。
+  "score": 1.0,
+
+  // 通过率；当前 TB2 adapter 与 score 保持一致。
+  "pass_rate": 1.0,
+
+  // 样本数量；通常等于成功解析到的 trial result 数。
+  "sample_count": 1,
+
+  // 运行级指标和原始 Harbor 信息；Edison 用于 trace、诊断和指标聚合。
+  "metrics": {
+    // 整个 Harbor job 耗时，单位秒。
+    "duration_seconds": 679.0,
+
+    // Harbor 原始 result.json 路径。
+    "harbor_result_path": "./tmp/local-tb2-smoke/output/harbor_jobs/2026-07-30__15-04-26/result.json",
+
+    // Harbor 进程返回码。
+    "harbor_returncode": 0,
+
+    // Harbor stdout 尾部，用于 Edison trace 展示和失败诊断。
+    "harbor_stdout_tail": "terminal-bench/terminal-bench-2 • terminus-2 • claude-sonnet-4-6\nMean: 1.000\n",
+
+    // Harbor stderr 尾部，用于 Edison trace 展示和失败诊断。
+    "harbor_stderr_tail": "",
+
+    // Harbor 原始 stats；保留 token、cost、异常数量等原始统计。
+    "harbor_stats": {
+      "n_completed_trials": 1,
+      "n_errored_trials": 0,
+      "n_running_trials": 0,
+      "n_pending_trials": 0,
+      "n_cancelled_trials": 0,
+      "n_retries": 0,
+      "evals": {},
+      "n_input_tokens": null,
+      "n_cache_tokens": null,
+      "n_output_tokens": null,
+      "cost_usd": null
+    }
+  },
+
+  // 样本级结果列表；Edison 会把这里每一项入库为一条 EvalResult。
+  "samples": [
+    {
+      // 样本唯一 ID；优先使用 benchmark 原始 task_id。
+      "id": "terminal-bench/fix-git",
+
+      // 样本名称；用于前端表格展示。
+      "name": "fix-git",
+
+      // 样本执行状态；completed 表示该样本没有基础设施异常。
+      "status": "completed",
+
+      // 样本得分；TB2 中通常等于 reward，范围 0-1。
+      "score": 1.0,
+
+      // TB2 verifier 返回的原始 reward。
+      "reward": 1.0,
+
+      // agent 输出或 trial 日志摘要；用于 trace 展示。
+      "output": "Task completed successfully.",
+
+      // 样本耗时，单位秒。
+      "latency_seconds": 679.0,
+
+      // 样本级原始指标；尽量保留 benchmark 原始信息，方便后续诊断。
+      "metrics": {
+        "trial_name": "fix-git__example",
+        "source": "terminal-bench/terminal-bench-2",
+        "agent_info": {
+          "name": "terminus-2"
+        },
+        "verifier_result": {
+          "rewards": {
+            "reward": 1.0
+          }
+        }
+      },
+
+      // 样本错误信息；成功时为 null。
+      "error": null
+    }
+  ],
+
+  // 运行级错误信息；成功时为 null，失败时放 adapter / Harbor 的关键错误。
+  "error": null
+}

@@ -691,6 +691,85 @@ def progress_hint(jobs_dir: Path) -> str:
     )
 
 
+def harbor_progress(jobs_dir: Path) -> dict[str, Any]:
+    job_dir = latest_job_dir(jobs_dir)
+    if not job_dir:
+        return {
+            "source": "terminal-bench-2",
+            "stage": "waiting_for_harbor_job",
+            "current": 0,
+            "total": 0,
+            "job_dir": None,
+            "running_trials": [],
+            "updated_at": now_iso(),
+        }
+
+    result_path = job_dir / "result.json"
+    stats: dict[str, Any] = {}
+    total = 0
+    finished_at = None
+    if result_path.exists():
+        try:
+            result = load_json(result_path)
+            total = int(result.get("n_total_trials") or 0)
+            finished_at = result.get("finished_at")
+            raw_stats = result.get("stats")
+            stats = raw_stats if isinstance(raw_stats, dict) else {}
+        except Exception:
+            stats = {}
+
+    completed = int(stats.get("n_completed_trials") or 0)
+    errored = int(stats.get("n_errored_trials") or 0)
+    cancelled = int(stats.get("n_cancelled_trials") or 0)
+    running = int(stats.get("n_running_trials") or 0)
+    pending = int(stats.get("n_pending_trials") or 0)
+    current = completed + errored + cancelled
+
+    running_trials: list[str] = []
+    completed_trials: list[str] = []
+    errored_trials: list[str] = []
+    for trial_dir in sorted(p for p in job_dir.iterdir() if p.is_dir() and "__" in p.name):
+        trial_result_path = trial_dir / "result.json"
+        if not trial_result_path.exists():
+            running_trials.append(trial_dir.name)
+            continue
+        try:
+            trial = load_json(trial_result_path)
+            if trial.get("exception_info"):
+                errored_trials.append(trial_dir.name)
+            else:
+                completed_trials.append(trial_dir.name)
+        except Exception:
+            completed_trials.append(trial_dir.name)
+
+    return {
+        "source": "terminal-bench-2",
+        "stage": "finished" if finished_at else "running",
+        "current": current,
+        "total": total,
+        "completed": completed,
+        "errored": errored,
+        "cancelled": cancelled,
+        "running": running,
+        "pending": pending,
+        "job_name": job_dir.name,
+        "job_dir": str(job_dir),
+        "running_trials": running_trials,
+        "completed_trials": completed_trials[-10:],
+        "errored_trials": errored_trials[-10:],
+        "updated_at": now_iso(),
+    }
+
+
+def write_progress(progress_path: Path | None, jobs_dir: Path) -> None:
+    if not progress_path:
+        return
+    try:
+        write_json(progress_path, harbor_progress(jobs_dir))
+    except Exception:
+        pass
+
+
 def _stream_reader(stream: Any, label: str, output_queue: "queue.Queue[tuple[str, str]]") -> None:
     try:
         for line in iter(stream.readline, ""):
@@ -723,7 +802,12 @@ def harbor_subprocess_env() -> dict[str, str]:
     return env
 
 
-def run_harbor_streaming(command: list[str], jobs_dir: Path, heartbeat_seconds: int = 30) -> tuple[int, str, str]:
+def run_harbor_streaming(
+    command: list[str],
+    jobs_dir: Path,
+    heartbeat_seconds: int = 30,
+    progress_path: Path | None = None,
+) -> tuple[int, str, str]:
     proc = subprocess.Popen(
         command,
         text=True,
@@ -765,6 +849,7 @@ def run_harbor_streaming(command: list[str], jobs_dir: Path, heartbeat_seconds: 
         now = time.monotonic()
         if now >= next_heartbeat:
             elapsed = int(now - started)
+            write_progress(progress_path, jobs_dir)
             print(
                 f"[tb2-adapter] heartbeat elapsed={elapsed}s {progress_hint(jobs_dir)}",
                 file=sys.stderr,
@@ -777,6 +862,7 @@ def run_harbor_streaming(command: list[str], jobs_dir: Path, heartbeat_seconds: 
     for thread in threads:
         thread.join(timeout=2)
     consume_queued_output()
+    write_progress(progress_path, jobs_dir)
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 
@@ -828,6 +914,8 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
 
     agent_result = trial.get("agent_result") if isinstance(trial.get("agent_result"), dict) else {}
     exception_info = trial.get("exception_info") if isinstance(trial.get("exception_info"), dict) else None
+    if reward is None and exception_info:
+        reward = 0.0
     duration = seconds_between(trial.get("started_at"), trial.get("finished_at"))
     output = (
         agent_result.get("message")
@@ -924,6 +1012,7 @@ def main() -> int:
     params = benchmark.get("params") if isinstance(benchmark.get("params"), dict) else {}
     model = edison_input.get("model") if isinstance(edison_input.get("model"), dict) else {}
     result_json = expand_path(str(paths.get("result_json") or "result.json"))
+    progress_json = expand_path(str(paths["progress_json"])) if paths.get("progress_json") else None
 
     try:
         command, harbor_jobs_dir = build_harbor_command(edison_input)
@@ -987,7 +1076,8 @@ def main() -> int:
             return 4
 
     print("[tb2-adapter] command:", " ".join(shlex_quote(part) for part in redact_command(command)), flush=True)
-    returncode, stdout, stderr = run_harbor_streaming(command, harbor_jobs_dir)
+    write_progress(progress_json, harbor_jobs_dir)
+    returncode, stdout, stderr = run_harbor_streaming(command, harbor_jobs_dir, progress_path=progress_json)
 
     harbor_result_path = latest_result_file(harbor_jobs_dir)
     if not harbor_result_path:
