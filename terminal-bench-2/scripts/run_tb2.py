@@ -26,6 +26,7 @@ HERMES_CONTAINER_PREFLIGHT_TASK_NAME = "edison/hermes-container-preflight"
 HERMES_CONTAINER_PREFLIGHT_LOCAL_TASK_FILTER = "hermes-container-preflight"
 EDISON_DEPLOYMENT_PREFIXES = {"moon", "sky"}
 EDISON_HERMES_IMPORT_PATH = "scripts.edison_hermes_agent:EdisonHermes"
+TERMINUS2_DEFAULT_TIMEOUT_MULTIPLIER = 5
 
 
 def expand_path(value: str | Path) -> Path:
@@ -166,6 +167,18 @@ def truthy(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def harbor_timeout_multiplier(params: dict[str, Any], agent: str) -> float | None:
+    if params.get("timeout_multiplier") is not None:
+        return float(params["timeout_multiplier"])
+    if agent == "terminus-2":
+        # terminus-2 may install tmux/asciinema inside each task container. On
+        # remote workers, apt repositories can be much slower than the Harbor
+        # per-command default timeout, so use a safer default while still
+        # allowing callers to override it explicitly.
+        return float(TERMINUS2_DEFAULT_TIMEOUT_MULTIPLIER)
+    return None
 
 
 def parse_task_names(value: Any) -> list[str]:
@@ -337,7 +350,7 @@ def append_common_harbor_options(command: list[str], *, params: dict[str, Any], 
     if bool(params.get("no_delete", True)):
         command.append("--no-delete")
 
-    timeout_multiplier = params.get("timeout_multiplier")
+    timeout_multiplier = harbor_timeout_multiplier(params, agent)
     if timeout_multiplier is not None:
         command.extend(["--timeout-multiplier", str(timeout_multiplier)])
 
@@ -456,7 +469,7 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path]:
         harbor_config = {
             "jobs_dir": str(harbor_jobs_dir),
             "n_concurrent_trials": runs,
-            "timeout_multiplier": float(params.get("timeout_multiplier") or 1),
+            "timeout_multiplier": float(harbor_timeout_multiplier(params, agent) or 1),
             "agent_timeout_multiplier": float(params.get("agent_timeout_multiplier") or (2 if agent == "hermes" else 1)),
             "verifier_timeout_multiplier": (
                 float(params["verifier_timeout_multiplier"])

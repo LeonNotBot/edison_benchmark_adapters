@@ -13,6 +13,7 @@
       "model_preflight_timeout_seconds": 30,
       "container_agent_preflight": false,
       "no_delete": true,
+      "timeout_multiplier": 5,
       "agent_timeout_multiplier": 2,
       "agent_setup_timeout_multiplier": 10
     }

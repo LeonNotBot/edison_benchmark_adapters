@@ -39,6 +39,10 @@
       // 是否保留 Harbor / Docker 运行产物；true 便于失败后查看 job.log、trial.log。
       "no_delete": true,
 
+      // Harbor 全局任务超时倍率；terminus-2 在容器内安装 tmux/asciinema 时可能触发单命令 120s 超时，
+      // Aliyun 等远端 worker 建议先用 5，后续再通过 apt 源/代理优化。
+      "timeout_multiplier": 5,
+
       // agent 做题超时倍率；TB2 的单题超时较长，真实模型建议先用 2。
       "agent_timeout_multiplier": 2,
 
