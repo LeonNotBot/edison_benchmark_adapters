@@ -14,6 +14,10 @@
       "container_agent_preflight": false,
       "no_delete": true,
       "timeout_multiplier": 5,
+      "patch_terminus_apt": true,
+      "container_apt_mirror": "http://mirrors.aliyun.com/debian",
+      "terminus_tool_install_timeout_seconds": 600,
+      "terminus_tool_install_budget_seconds": 900,
       "agent_timeout_multiplier": 2,
       "agent_setup_timeout_multiplier": 10
     }

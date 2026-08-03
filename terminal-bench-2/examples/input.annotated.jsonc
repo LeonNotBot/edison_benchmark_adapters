@@ -43,6 +43,19 @@
       // Aliyun 等远端 worker 建议先用 5，后续再通过 apt 源/代理优化。
       "timeout_multiplier": 5,
 
+      // 是否给 Harbor 内置 terminus-2 agent 打一个运行时补丁：
+      // 在容器内安装 tmux/asciinema 前，将 Debian apt 源替换为 container_apt_mirror。
+      "patch_terminus_apt": true,
+
+      // 容器内 Debian apt 镜像源；Aliyun worker 推荐用阿里云源。
+      "container_apt_mirror": "http://mirrors.aliyun.com/debian",
+
+      // terminus-2 安装 tmux/asciinema 的单条命令超时秒数；Harbor 默认约 120s，远端 worker 可能不够。
+      "terminus_tool_install_timeout_seconds": 600,
+
+      // terminus-2 整个工具安装阶段预算秒数；需要大于上面的单命令超时。
+      "terminus_tool_install_budget_seconds": 900,
+
       // agent 做题超时倍率；TB2 的单题超时较长，真实模型建议先用 2。
       "agent_timeout_multiplier": 2,
 

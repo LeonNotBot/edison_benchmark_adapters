@@ -27,6 +27,9 @@ HERMES_CONTAINER_PREFLIGHT_LOCAL_TASK_FILTER = "hermes-container-preflight"
 EDISON_DEPLOYMENT_PREFIXES = {"moon", "sky"}
 EDISON_HERMES_IMPORT_PATH = "scripts.edison_hermes_agent:EdisonHermes"
 TERMINUS2_DEFAULT_TIMEOUT_MULTIPLIER = 5
+TERMINUS2_DEFAULT_APT_MIRROR = "http://mirrors.aliyun.com/debian"
+TERMINUS2_DEFAULT_TOOL_INSTALL_TIMEOUT_SEC = 600
+TERMINUS2_DEFAULT_TOOL_INSTALL_BUDGET_SEC = 900
 
 
 def expand_path(value: str | Path) -> Path:
@@ -662,6 +665,8 @@ def run_hermes_container_preflight(edison_input: dict[str, Any], result_json: Pa
         command,
         preflight_jobs_dir,
         heartbeat_seconds=int(params.get("container_preflight_heartbeat_seconds") or 30),
+        params=params,
+        agent="hermes",
     )
     harbor_result_path = latest_result_file(preflight_jobs_dir)
     score = read_harbor_score(harbor_result_path) if harbor_result_path else None
@@ -827,7 +832,7 @@ def _stream_reader(stream: Any, label: str, output_queue: "queue.Queue[tuple[str
             pass
 
 
-def harbor_subprocess_env() -> dict[str, str]:
+def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "") -> dict[str, str]:
     """Return environment for the Harbor child process.
 
     Harbor imports custom agents from ``import_path`` in the generated config.
@@ -835,14 +840,33 @@ def harbor_subprocess_env() -> dict[str, str]:
     guaranteed to be the adapter root, so make the adapter package importable
     explicitly for both local single-machine and remote worker deployments.
     """
+    params = params or {}
     env = os.environ.copy()
     adapter_root = str(ADAPTER_DIR)
+    harbor_patch_root = str(ADAPTER_DIR / "scripts" / "harbor_patches")
     existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        f"{adapter_root}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else adapter_root
-    )
+    pythonpath_entries = [harbor_patch_root, adapter_root]
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+
+    if agent == "terminus-2" and truthy(params.get("patch_terminus_apt"), True):
+        env["EDISON_TB2_PATCH_TERMINUS_APT"] = "1"
+        env["EDISON_TB2_APT_MIRROR"] = str(
+            params.get("container_apt_mirror")
+            or os.environ.get("EDISON_TB2_APT_MIRROR")
+            or TERMINUS2_DEFAULT_APT_MIRROR
+        )
+        env["EDISON_TB2_TOOL_INSTALL_TIMEOUT_SEC"] = str(
+            params.get("terminus_tool_install_timeout_seconds")
+            or os.environ.get("EDISON_TB2_TOOL_INSTALL_TIMEOUT_SEC")
+            or TERMINUS2_DEFAULT_TOOL_INSTALL_TIMEOUT_SEC
+        )
+        env["EDISON_TB2_TOOL_INSTALL_BUDGET_SEC"] = str(
+            params.get("terminus_tool_install_budget_seconds")
+            or os.environ.get("EDISON_TB2_TOOL_INSTALL_BUDGET_SEC")
+            or TERMINUS2_DEFAULT_TOOL_INSTALL_BUDGET_SEC
+        )
     return env
 
 
@@ -851,6 +875,8 @@ def run_harbor_streaming(
     jobs_dir: Path,
     heartbeat_seconds: int = 30,
     progress_path: Path | None = None,
+    params: dict[str, Any] | None = None,
+    agent: str = "",
 ) -> tuple[int, str, str]:
     proc = subprocess.Popen(
         command,
@@ -858,7 +884,7 @@ def run_harbor_streaming(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=1,
-        env=harbor_subprocess_env(),
+        env=harbor_subprocess_env(params=params, agent=agent),
     )
     output_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
     threads = [
@@ -1121,7 +1147,13 @@ def main() -> int:
 
     print("[tb2-adapter] command:", " ".join(shlex_quote(part) for part in redact_command(command)), flush=True)
     write_progress(progress_json, harbor_jobs_dir)
-    returncode, stdout, stderr = run_harbor_streaming(command, harbor_jobs_dir, progress_path=progress_json)
+    returncode, stdout, stderr = run_harbor_streaming(
+        command,
+        harbor_jobs_dir,
+        progress_path=progress_json,
+        params=params,
+        agent=agent,
+    )
 
     harbor_result_path = latest_result_file(harbor_jobs_dir)
     if not harbor_result_path:
