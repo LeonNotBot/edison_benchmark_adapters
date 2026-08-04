@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -885,7 +886,42 @@ def run_harbor_streaming(
         stderr=subprocess.PIPE,
         bufsize=1,
         env=harbor_subprocess_env(params=params, agent=agent),
+        start_new_session=True,
     )
+    stop_requested = False
+
+    def terminate_harbor_process(force: bool = False) -> None:
+        if proc.poll() is not None:
+            return
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        except Exception:
+            try:
+                proc.kill() if force else proc.terminate()
+            except Exception:
+                pass
+
+    previous_handlers: dict[int, Any] = {}
+
+    def request_stop(signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        print(
+            f"[tb2-adapter] received signal {signum}; terminating Harbor process group",
+            file=sys.stderr,
+            flush=True,
+        )
+        write_progress(progress_path, jobs_dir)
+        terminate_harbor_process(force=False)
+
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, request_stop)
+
     output_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
     threads = [
         threading.Thread(target=_stream_reader, args=(proc.stdout, "stdout", output_queue), daemon=True),
@@ -898,6 +934,7 @@ def run_harbor_streaming(
     stderr_chunks: list[str] = []
     started = time.monotonic()
     next_heartbeat = started + heartbeat_seconds
+    stop_started_at: float | None = None
 
     def consume_queued_output() -> None:
         while True:
@@ -917,6 +954,12 @@ def run_harbor_streaming(
         if proc.poll() is not None:
             break
         now = time.monotonic()
+        if stop_requested:
+            if stop_started_at is None:
+                stop_started_at = now
+            elif now - stop_started_at > 15:
+                print("[tb2-adapter] Harbor did not exit after SIGTERM; sending SIGKILL", file=sys.stderr, flush=True)
+                terminate_harbor_process(force=True)
         if now >= next_heartbeat:
             elapsed = int(now - started)
             write_progress(progress_path, jobs_dir)
@@ -933,6 +976,8 @@ def run_harbor_streaming(
         thread.join(timeout=2)
     consume_queued_output()
     write_progress(progress_path, jobs_dir)
+    for sig, handler in previous_handlers.items():
+        signal.signal(sig, handler)
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 
