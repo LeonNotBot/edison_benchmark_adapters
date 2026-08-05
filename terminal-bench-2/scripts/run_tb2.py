@@ -234,6 +234,20 @@ def harbor_dataset_config(dataset: str, task_names: list[str], limit: int) -> di
     return entry
 
 
+def safe_harbor_job_name(config: dict[str, Any]) -> str:
+    task = config.get("task") if isinstance(config.get("task"), dict) else {}
+    benchmark = config.get("benchmark") if isinstance(config.get("benchmark"), dict) else {}
+    raw = str(
+        benchmark.get("job_name")
+        or benchmark.get("run_id")
+        or task.get("id")
+        or config.get("task_id")
+        or f"tb2-{int(time.time())}"
+    )
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-")[:96]
+    return f"edison-{slug or int(time.time())}"
+
+
 def post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -435,7 +449,7 @@ def harbor_agent_config(agent: str, model: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path]:
+def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str | None]:
     benchmark = config.get("benchmark") if isinstance(config.get("benchmark"), dict) else {}
     model = config.get("model") if isinstance(config.get("model"), dict) else {}
     paths = config.get("paths") if isinstance(config.get("paths"), dict) else {}
@@ -460,8 +474,11 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path]:
         or params.get("tasks")
     )
     output_dir = expand_path(str(paths.get("output_dir") or params.get("jobs_dir") or "~/data/edison_external_benchmarks/terminal-bench-2"))
+    run_dir = expand_path(str(paths.get("run_dir") or output_dir))
+    run_dir.mkdir(parents=True, exist_ok=True)
     harbor_jobs_dir = output_dir / "harbor_jobs"
     harbor_jobs_dir.mkdir(parents=True, exist_ok=True)
+    job_name = safe_harbor_job_name(config)
 
     harbor_bin = str(params.get("harbor_bin") or os.environ.get("EXTERNAL_BENCHMARK_HARBOR_BIN") or os.environ.get("HARBOR_BIN") or "harbor")
     if "/" not in harbor_bin:
@@ -469,8 +486,9 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path]:
         if resolved:
             harbor_bin = resolved
 
-    if task_names or agent == "hermes":
+    if task_names or agent == "hermes" or job_name:
         harbor_config = {
+            "job_name": job_name,
             "jobs_dir": str(harbor_jobs_dir),
             "n_concurrent_trials": runs,
             "timeout_multiplier": float(harbor_timeout_multiplier(params, agent) or 1),
@@ -494,14 +512,14 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path]:
             "datasets": [harbor_dataset_config(dataset, task_names, limit)],
         }
         harbor_config = {k: v for k, v in harbor_config.items() if v is not None}
-        config_path = output_dir / "harbor_task_config.json"
+        config_path = run_dir / "harbor_task_config.json"
         write_json(config_path, harbor_config)
         command = [harbor_bin, "run", "--config", str(config_path)]
         if truthy(params.get("debug"), False):
             command.append("--debug")
         for item in params.get("extra_args") or []:
             command.append(str(item))
-        return command, harbor_jobs_dir
+        return command, harbor_jobs_dir, job_name
 
     command = [
         harbor_bin,
@@ -524,7 +542,7 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path]:
 
     append_common_harbor_options(command, params=params, agent=agent)
 
-    return command, harbor_jobs_dir
+    return command, harbor_jobs_dir, None
 
 
 def resolve_harbor_bin(params: dict[str, Any]) -> str:
@@ -649,6 +667,7 @@ def run_hermes_container_preflight(edison_input: dict[str, Any], result_json: Pa
     preflight_jobs_dir.mkdir(parents=True, exist_ok=True)
     preflight_config_path = output_dir / "container_preflight_config.json"
     preflight_config = build_hermes_container_preflight_config(edison_input, preflight_jobs_dir)
+    preflight_job_name = str(preflight_config.get("job_name") or "")
     write_json(preflight_config_path, preflight_config)
 
     command = [
@@ -666,15 +685,16 @@ def run_hermes_container_preflight(edison_input: dict[str, Any], result_json: Pa
         command,
         preflight_jobs_dir,
         heartbeat_seconds=int(params.get("container_preflight_heartbeat_seconds") or 30),
+        job_name=preflight_job_name,
         params=params,
         agent="hermes",
     )
-    harbor_result_path = latest_result_file(preflight_jobs_dir)
+    harbor_result_path = latest_result_file(preflight_jobs_dir, preflight_job_name)
     score = read_harbor_score(harbor_result_path) if harbor_result_path else None
     if returncode == 0 and score == 1:
         print(
             "[tb2-adapter] container preflight ok: "
-            f"agent=hermes score={score} {progress_hint(preflight_jobs_dir)}",
+            f"agent=hermes score={score} {progress_hint(preflight_jobs_dir, preflight_job_name)}",
             flush=True,
         )
         return
@@ -712,12 +732,18 @@ def run_hermes_container_preflight(edison_input: dict[str, Any], result_json: Pa
     raise RuntimeError(error)
 
 
-def latest_result_file(jobs_dir: Path) -> Path | None:
+def latest_result_file(jobs_dir: Path, job_name: str | None = None) -> Path | None:
+    if job_name:
+        result_path = jobs_dir / job_name / "result.json"
+        return result_path if result_path.exists() else None
     candidates = sorted(jobs_dir.glob("*/result.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0] if candidates else None
 
 
-def latest_job_dir(jobs_dir: Path) -> Path | None:
+def latest_job_dir(jobs_dir: Path, job_name: str | None = None) -> Path | None:
+    if job_name:
+        job_dir = jobs_dir / job_name
+        return job_dir if job_dir.exists() and job_dir.is_dir() else None
     candidates = sorted(
         (p for p in jobs_dir.iterdir() if p.is_dir()),
         key=lambda p: p.stat().st_mtime,
@@ -726,29 +752,31 @@ def latest_job_dir(jobs_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def progress_hint(jobs_dir: Path) -> str:
-    job_dir = latest_job_dir(jobs_dir)
+def progress_hint(jobs_dir: Path, job_name: str | None = None) -> str:
+    job_dir = latest_job_dir(jobs_dir, job_name)
     if not job_dir:
-        return f"jobs_dir={jobs_dir} latest_job=waiting"
+        waiting_name = job_name or "latest"
+        return f"jobs_dir={jobs_dir} job={waiting_name} waiting"
     trial_results = len([
         path for path in job_dir.glob("*/result.json")
         if path.parent != job_dir
     ])
     final_result = (job_dir / "result.json").exists()
     return (
-        f"jobs_dir={jobs_dir} latest_job={job_dir.name} "
+        f"jobs_dir={jobs_dir} job={job_dir.name} "
         f"trial_results={trial_results} final_result={'yes' if final_result else 'no'}"
     )
 
 
-def harbor_progress(jobs_dir: Path) -> dict[str, Any]:
-    job_dir = latest_job_dir(jobs_dir)
+def harbor_progress(jobs_dir: Path, job_name: str | None = None) -> dict[str, Any]:
+    job_dir = latest_job_dir(jobs_dir, job_name)
     if not job_dir:
         return {
             "source": "terminal-bench-2",
             "stage": "waiting_for_harbor_job",
             "current": 0,
             "total": 0,
+            "job_name": job_name,
             "job_dir": None,
             "running_trials": [],
             "updated_at": now_iso(),
@@ -811,11 +839,11 @@ def harbor_progress(jobs_dir: Path) -> dict[str, Any]:
     }
 
 
-def write_progress(progress_path: Path | None, jobs_dir: Path) -> None:
+def write_progress(progress_path: Path | None, jobs_dir: Path, job_name: str | None = None) -> None:
     if not progress_path:
         return
     try:
-        write_json(progress_path, harbor_progress(jobs_dir))
+        write_json(progress_path, harbor_progress(jobs_dir, job_name))
     except Exception:
         pass
 
@@ -876,6 +904,7 @@ def run_harbor_streaming(
     jobs_dir: Path,
     heartbeat_seconds: int = 30,
     progress_path: Path | None = None,
+    job_name: str | None = None,
     params: dict[str, Any] | None = None,
     agent: str = "",
 ) -> tuple[int, str, str]:
@@ -914,7 +943,7 @@ def run_harbor_streaming(
             file=sys.stderr,
             flush=True,
         )
-        write_progress(progress_path, jobs_dir)
+        write_progress(progress_path, jobs_dir, job_name)
         terminate_harbor_process(force=False)
 
     if threading.current_thread() is threading.main_thread():
@@ -962,9 +991,9 @@ def run_harbor_streaming(
                 terminate_harbor_process(force=True)
         if now >= next_heartbeat:
             elapsed = int(now - started)
-            write_progress(progress_path, jobs_dir)
+            write_progress(progress_path, jobs_dir, job_name)
             print(
-                f"[tb2-adapter] heartbeat elapsed={elapsed}s {progress_hint(jobs_dir)}",
+                f"[tb2-adapter] heartbeat elapsed={elapsed}s {progress_hint(jobs_dir, job_name)}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -975,7 +1004,7 @@ def run_harbor_streaming(
     for thread in threads:
         thread.join(timeout=2)
     consume_queued_output()
-    write_progress(progress_path, jobs_dir)
+    write_progress(progress_path, jobs_dir, job_name)
     for sig, handler in previous_handlers.items():
         signal.signal(sig, handler)
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
@@ -1130,7 +1159,7 @@ def main() -> int:
     progress_json = expand_path(str(paths["progress_json"])) if paths.get("progress_json") else None
 
     try:
-        command, harbor_jobs_dir = build_harbor_command(edison_input)
+        command, harbor_jobs_dir, harbor_job_name = build_harbor_command(edison_input)
     except Exception as exc:
         write_json(result_json, {
             "protocol_version": "edison.external_benchmark.v1",
@@ -1191,16 +1220,17 @@ def main() -> int:
             return 4
 
     print("[tb2-adapter] command:", " ".join(shlex_quote(part) for part in redact_command(command)), flush=True)
-    write_progress(progress_json, harbor_jobs_dir)
+    write_progress(progress_json, harbor_jobs_dir, harbor_job_name)
     returncode, stdout, stderr = run_harbor_streaming(
         command,
         harbor_jobs_dir,
         progress_path=progress_json,
+        job_name=harbor_job_name,
         params=params,
         agent=agent,
     )
 
-    harbor_result_path = latest_result_file(harbor_jobs_dir)
+    harbor_result_path = latest_result_file(harbor_jobs_dir, harbor_job_name)
     if not harbor_result_path:
         write_json(result_json, {
             "protocol_version": "edison.external_benchmark.v1",
