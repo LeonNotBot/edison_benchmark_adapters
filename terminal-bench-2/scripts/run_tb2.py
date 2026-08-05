@@ -31,6 +31,7 @@ TERMINUS2_DEFAULT_TIMEOUT_MULTIPLIER = 5
 TERMINUS2_DEFAULT_APT_MIRROR = "http://mirrors.aliyun.com/debian"
 TERMINUS2_DEFAULT_TOOL_INSTALL_TIMEOUT_SEC = 600
 TERMINUS2_DEFAULT_TOOL_INSTALL_BUDGET_SEC = 900
+DEFAULT_CONTAINER_NO_PROXY = "localhost,127.0.0.1,::1"
 
 
 def expand_path(value: str | Path) -> Path:
@@ -433,6 +434,104 @@ def model_env_templates(model: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+def container_proxy_env_templates(params: dict[str, Any]) -> dict[str, str]:
+    """Return proxy env entries that should be visible inside Harbor containers.
+
+    This is intentionally opt-in. Edison / worker hosts may have different
+    network policies, and enabling a proxy globally can affect model endpoint
+    routing. Configure ``params.container_proxy_url`` only for workers whose
+    TB2 containers need a proxy for GitHub releases or other external downloads.
+    """
+    if not truthy(params.get("container_proxy_enabled"), True):
+        return {}
+
+    proxy_url = str(
+        params.get("container_proxy_url")
+        or params.get("docker_proxy")
+        or params.get("proxy_url")
+        or os.environ.get("EDISON_TB2_CONTAINER_PROXY_URL")
+        or ""
+    ).strip()
+    if not proxy_url:
+        return {}
+
+    no_proxy = str(
+        params.get("container_no_proxy")
+        or os.environ.get("EDISON_TB2_CONTAINER_NO_PROXY")
+        or DEFAULT_CONTAINER_NO_PROXY
+    ).strip()
+
+    env = {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "ALL_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "all_proxy": proxy_url,
+    }
+    if no_proxy:
+        env.update({
+            "NO_PROXY": no_proxy,
+            "no_proxy": no_proxy,
+        })
+    return env
+
+
+def merge_env_templates(*envs: dict[str, str]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for env in envs:
+        merged.update(env)
+    return merged
+
+
+def write_container_proxy_compose(run_dir: Path, params: dict[str, Any], proxy_env: dict[str, str]) -> Path | None:
+    """Write a compose override that lets Linux containers resolve host.docker.internal."""
+    if not proxy_env:
+        return None
+
+    proxy_values = " ".join(proxy_env.values()).lower()
+    needs_host_gateway = "host.docker.internal" in proxy_values
+    if not truthy(params.get("container_proxy_host_gateway"), needs_host_gateway):
+        return None
+
+    host_alias = str(params.get("container_proxy_host_alias") or "host.docker.internal:host-gateway").strip()
+    if not host_alias:
+        return None
+
+    path = run_dir / "container_proxy_compose.json"
+    write_json(path, {"services": {"main": {"extra_hosts": [host_alias]}}})
+    return path
+
+
+def harbor_agent_config_with_runtime_env(agent: str, model: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    config = harbor_agent_config(agent, model)
+    proxy_env = container_proxy_env_templates(params)
+    if proxy_env:
+        config["env"] = merge_env_templates(config.get("env") or {}, proxy_env)
+    return config
+
+
+def harbor_environment_config(run_dir: Path, params: dict[str, Any]) -> dict[str, Any]:
+    proxy_env = container_proxy_env_templates(params)
+    environment: dict[str, Any] = {
+        "type": "docker",
+        "delete": not bool(params.get("no_delete", True)),
+    }
+    if proxy_env:
+        environment["env"] = proxy_env
+
+    extra_compose: list[str] = []
+    proxy_compose = write_container_proxy_compose(run_dir, params, proxy_env)
+    if proxy_compose:
+        extra_compose.append(str(proxy_compose))
+    for item in params.get("extra_docker_compose") or []:
+        extra_compose.append(str(expand_path(str(item))))
+    if extra_compose:
+        environment["extra_docker_compose"] = extra_compose
+
+    return environment
+
+
 def harbor_agent_config(agent: str, model: dict[str, Any]) -> dict[str, Any]:
     if agent == "oracle":
         return {"name": "oracle"}
@@ -504,11 +603,8 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str |
                 if params.get("environment_build_timeout_multiplier") is not None
                 else None
             ),
-            "environment": {
-                "type": "docker",
-                "delete": not bool(params.get("no_delete", True)),
-            },
-            "agents": [harbor_agent_config(agent, model)],
+            "environment": harbor_environment_config(run_dir, params),
+            "agents": [harbor_agent_config_with_runtime_env(agent, model, params)],
             "datasets": [harbor_dataset_config(dataset, task_names, limit)],
         }
         harbor_config = {k: v for k, v in harbor_config.items() if v is not None}
@@ -559,6 +655,7 @@ def build_hermes_container_preflight_config(config: dict[str, Any], jobs_dir: Pa
     model = config.get("model") if isinstance(config.get("model"), dict) else {}
     params = benchmark.get("params") if isinstance(benchmark.get("params"), dict) else {}
     model_name = normalize_hermes_harbor_model(model)
+    run_dir = jobs_dir.parent / "container_preflight_run"
 
     return {
         "job_name": f"edison-hermes-container-preflight-{int(time.time())}",
@@ -567,14 +664,11 @@ def build_hermes_container_preflight_config(config: dict[str, Any], jobs_dir: Pa
         "agent_setup_timeout_multiplier": float(params.get("container_preflight_agent_setup_timeout_multiplier") or params.get("agent_setup_timeout_multiplier") or 10),
         "agent_timeout_multiplier": float(params.get("container_preflight_agent_timeout_multiplier") or 2),
         "verifier_timeout_multiplier": float(params.get("container_preflight_verifier_timeout_multiplier") or 1),
-        "environment": {
-            "type": "docker",
-            "delete": not bool(params.get("no_delete", True)),
-        },
+        "environment": harbor_environment_config(run_dir, params),
         "agents": [{
             "import_path": EDISON_HERMES_IMPORT_PATH,
             "model_name": model_name,
-            "env": model_env_templates(model),
+            "env": merge_env_templates(model_env_templates(model), container_proxy_env_templates(params)),
         }],
         "datasets": [{
             "path": str(HERMES_CONTAINER_PREFLIGHT_DATASET),

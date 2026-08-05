@@ -50,6 +50,14 @@
       // 容器内 Debian apt 镜像源；Aliyun worker 推荐用阿里云源。
       "container_apt_mirror": "http://mirrors.aliyun.com/debian",
 
+      // 可选：让 Harbor 创建的 TB2 Docker 容器通过宿主机代理访问 GitHub / release 下载。
+      // Linux worker 需要代理工具开启“局域网代理”，并允许容器访问 host.docker.internal:7892。
+      // 不需要代理时删除该字段或置空即可。
+      "container_proxy_url": "http://host.docker.internal:7892",
+
+      // 容器内代理排除列表；通常保留 localhost 即可。
+      "container_no_proxy": "localhost,127.0.0.1,::1",
+
       // terminus-2 安装 tmux/asciinema 的单条命令超时秒数；Harbor 默认约 120s，远端 worker 可能不够。
       "terminus_tool_install_timeout_seconds": 600,
 
