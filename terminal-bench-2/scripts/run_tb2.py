@@ -485,21 +485,25 @@ def merge_env_templates(*envs: dict[str, str]) -> dict[str, str]:
 
 
 def write_container_proxy_compose(run_dir: Path, params: dict[str, Any], proxy_env: dict[str, str]) -> Path | None:
-    """Write a compose override that lets Linux containers resolve host.docker.internal."""
+    """Write a compose override that injects proxy env into Harbor containers.
+
+    Harbor's own environment config is not always enough for task verifier
+    scripts. The compose override is closer to the Docker layer, so the
+    variables are visible to commands such as curl/uv inside the TB2 container.
+    """
     if not proxy_env:
         return None
 
     proxy_values = " ".join(proxy_env.values()).lower()
     needs_host_gateway = "host.docker.internal" in proxy_values
-    if not truthy(params.get("container_proxy_host_gateway"), needs_host_gateway):
-        return None
-
-    host_alias = str(params.get("container_proxy_host_alias") or "host.docker.internal:host-gateway").strip()
-    if not host_alias:
-        return None
+    service_config: dict[str, Any] = {"environment": proxy_env}
+    if truthy(params.get("container_proxy_host_gateway"), needs_host_gateway):
+        host_alias = str(params.get("container_proxy_host_alias") or "host.docker.internal:host-gateway").strip()
+        if host_alias:
+            service_config["extra_hosts"] = [host_alias]
 
     path = run_dir / "container_proxy_compose.json"
-    write_json(path, {"services": {"main": {"extra_hosts": [host_alias]}}})
+    write_json(path, {"services": {"main": service_config}})
     return path
 
 
