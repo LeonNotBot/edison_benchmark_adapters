@@ -969,6 +969,19 @@ def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "")
     """
     params = params or {}
     env = os.environ.copy()
+
+    # Harbor and its dependencies use httpx, which requires the optional
+    # ``socksio`` package for socks proxies. Worker shells may have a stale
+    # ALL_PROXY=socks5://127.0.0.1:xxxx from an interactive debugging session;
+    # if passed through, Harbor can fail before it even starts a TB2 job.
+    # Container-level proxy injection is handled separately by
+    # ``container_proxy_url``, so it is safe to strip unsupported host socks
+    # proxies here.
+    for key in ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        value = str(env.get(key) or "").strip().lower()
+        if value.startswith(("socks://", "socks4://", "socks5://")):
+            env.pop(key, None)
+
     adapter_root = str(ADAPTER_DIR)
     harbor_patch_root = str(ADAPTER_DIR / "scripts" / "harbor_patches")
     existing_pythonpath = env.get("PYTHONPATH", "")
