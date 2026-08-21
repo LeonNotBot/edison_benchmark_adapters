@@ -247,20 +247,20 @@ def prepare_inspect_env(
             "EDISON_MODEL_API_KEY",
         )
         if api_key:
-            env.setdefault("ANTHROPIC_API_KEY", api_key)
-            env.setdefault("ANTHROPIC_AUTH_TOKEN", api_key)
+            env["ANTHROPIC_API_KEY"] = api_key
+            env["ANTHROPIC_AUTH_TOKEN"] = api_key
         if endpoint:
-            env.setdefault("ANTHROPIC_BASE_URL", re.sub(r"/v1$", "", endpoint))
+            env["ANTHROPIC_BASE_URL"] = re.sub(r"/v1$", "", endpoint)
     elif provider == "openai":
         api_key = env_value(api_key_env, "OPENAI_API_KEY", "EDISON_MODEL_API_KEY")
         if api_key:
-            env.setdefault("OPENAI_API_KEY", api_key)
+            env["OPENAI_API_KEY"] = api_key
         if endpoint:
-            env.setdefault("OPENAI_BASE_URL", endpoint if endpoint.endswith("/v1") else f"{endpoint}/v1")
+            env["OPENAI_BASE_URL"] = endpoint if endpoint.endswith("/v1") else f"{endpoint}/v1"
     elif provider == "openrouter":
         api_key = env_value(api_key_env, "OPENROUTER_API_KEY", "EDISON_MODEL_API_KEY")
         if api_key:
-            env.setdefault("OPENROUTER_API_KEY", api_key)
+            env["OPENROUTER_API_KEY"] = api_key
 
     env["PYTHONPATH"] = (
         str(inspect_evals_dir / "src")
@@ -268,6 +268,30 @@ def prepare_inspect_env(
         + env.get("PYTHONPATH", "")
     )
     return env
+
+
+def compact_json_text(value: Any, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    return text[:limit]
+
+
+def sample_error_from_inspect(sample: dict[str, Any]) -> Any:
+    return sample.get("error") or sample.get("exception") or sample.get("message")
+
+
+def sample_error_message(error: Any) -> str:
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("exception_message") or error.get("type")
+        if message:
+            return str(message)
+    if error:
+        return str(error).splitlines()[0][:500]
+    return ""
 
 
 def sample_score_from_inspect(sample: dict[str, Any]) -> float | None:
@@ -285,6 +309,8 @@ def sample_score_from_inspect(sample: dict[str, Any]) -> float | None:
             return 0.0
         if text_value in {"p", "partial", "partially_correct"}:
             return 0.5
+    if sample_error_from_inspect(sample):
+        return 0.0
     return None
 
 
@@ -314,21 +340,31 @@ def normalize_samples(log_data: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(sample, dict):
             continue
         sample_id = str(sample.get("id") or sample.get("sample_id") or index)
+        sample_error = sample_error_from_inspect(sample)
         score = sample_score_from_inspect(sample)
+        status = "error" if sample_error else ("completed" if score is not None else "error")
+        output: Any = sample.get("target") or sample.get("output")
+        if sample_error:
+            output = {
+                "message": sample_error_message(sample_error) or "Inspect sample failed before scoring",
+                "error": sample_error,
+            }
         normalized.append(
             {
                 "id": sample_id,
                 "name": sample_id,
-                "status": "completed" if score is not None else "error",
+                "status": status,
                 "score": score,
                 "reward": score,
-                "output": str(sample.get("target") or sample.get("error") or "")[:4000],
+                "output": compact_json_text(output),
                 "latency_seconds": None,
                 "metrics": {
                     "source": BENCHMARK_NAME,
                     "inspect_sample": sample,
+                    "scoring_method": "inspect_error_as_zero" if sample_error else "livecodebench_pro_scorer",
+                    "judge_reason": sample_error_message(sample_error) if sample_error else "",
                 },
-                "error": None if score is not None else str(sample.get("error") or ""),
+                "error": compact_json_text(sample_error) if sample_error else None,
             }
         )
     return normalized
