@@ -1,0 +1,32 @@
+{
+  "task_id": "local-livecodebench-pro-smoke",
+  "task_name": "LiveCodeBench Pro local smoke",
+  "benchmark": {
+    "adapter": "livecodebench-pro",
+    "agent": "model",
+    "suite": "livecodebench-pro",
+    "task_names": "2053B",
+    "limit": 1,
+    "runs": 1,
+    "params": {
+      "model_preflight": true,
+      "model_preflight_timeout_seconds": 60,
+      "split": "quater_2024_10_12",
+      "no_fail_on_error": true,
+      "continue_on_fail": true
+    }
+  },
+  "model": {
+    "provider": "anthropic",
+    "normalized_provider": "anthropic",
+    "model_identifier": "anthropic/claude-sonnet-4-6",
+    "api_endpoint": "ANTHROPIC_BASE_URL",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+  "paths": {
+    "run_dir": "./tmp/local-livecodebench-pro-smoke/run",
+    "output_dir": "./tmp/local-livecodebench-pro-smoke/output",
+    "result_json": "./tmp/local-livecodebench-pro-smoke/output/result.json",
+    "progress_json": "./tmp/local-livecodebench-pro-smoke/run/progress.json"
+  }
+}
