@@ -1,0 +1,49 @@
+{
+  "protocol_version": "edison.external_benchmark.v1",
+  "adapter": "omnidocbench",
+  "benchmark": "OmniDocBench/end2end",
+  "suite": "OmniDocBench/end2end",
+  "agent": "",
+  "model": "anthropic/claude-sonnet-4-6",
+  "run_id": "2026-08-19__10-00-00",
+  "status": "completed",
+  "score": 0.7798911876002474,
+  "pass_rate": 0.7798911876002474,
+  "sample_count": 1,
+  "metrics": {
+    "duration_seconds": 312.5,
+    "docker_image": "ghcr.io/zeng-weijun/omnidocbench-eval:repro-ubuntu2204",
+    "docker_returncode": 0,
+    "stdout_tail": "OmniDocBench end2end done",
+    "stderr_tail": "",
+    "dimension_scores": {
+      "text_block": 0.6643785245986866,
+      "display_formula": 0.8827391304347827,
+      "table": 0.7967474695389661,
+      "reading_order": 0.7756996258285541,
+      "overall": 0.7798911876002474
+    }
+  },
+  "samples": [
+    {
+      "id": "omnidocbench_end2end",
+      "name": "end2end",
+      "status": "completed",
+      "score": 0.7798911876002474,
+      "output": "OmniDocBench end2end overall=0.7799",
+      "latency_seconds": 312.5,
+      "metrics": {
+        "dimension_scores": {
+          "text_block": 0.6643785245986866,
+          "display_formula": 0.8827391304347827,
+          "table": 0.7967474695389661,
+          "reading_order": 0.7756996258285541,
+          "overall": 0.7798911876002474
+        },
+        "raw_metrics": "<省略: 见 result 目录下 end2end_quick_match_metric_result.json>"
+      },
+      "error": null
+    }
+  ],
+  "error": null
+}

@@ -1,0 +1,35 @@
+{
+  "protocol_version": "edison.external_benchmark.v1",
+  "task": {
+    "id": "local-omnidocbench-full",
+    "name": "OmniDocBench end2end full dataset (1651 samples)",
+    "description": "OmniDocBench 完整数据集端到端评测",
+    "scoring_strategy": "score"
+  },
+  "benchmark": {
+    "adapter": "omnidocbench",
+    "suite": "OmniDocBench/end2end",
+    "agent": "",
+    "limit": null,
+    "runs": 1,
+    "task_names": null,
+    "params": {
+      "gt_json": "../../OmniDocBench/full_dataset/OmniDocBench.json",
+      "vlm_max_tokens": 16384,
+      "vlm_temperature": 0
+    }
+  },
+  "model": {
+    "provider": "openrouter",
+    "normalized_provider": "openrouter",
+    "model_identifier": "anthropic/claude-sonnet-4",
+    "api_endpoint": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY"
+  },
+  "paths": {
+    "run_dir": "./tmp/local-omnidocbench-full/run",
+    "output_dir": "./tmp/local-omnidocbench-full/output",
+    "result_json": "./tmp/local-omnidocbench-full/output/result.json",
+    "progress_json": "./tmp/local-omnidocbench-full/run/progress.json"
+  }
+}

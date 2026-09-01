@@ -1,0 +1,13 @@
+{
+  "protocol_version": "edison.external_benchmark.v1",
+  "adapter": "omnidocbench",
+  "benchmark": "OmniDocBench/end2end",
+  "suite": "OmniDocBench/end2end",
+  "status": "error",
+  "score": null,
+  "pass_rate": null,
+  "sample_count": 0,
+  "samples": [],
+  "error": "params.gt_json 和 params.predictions_dir 必须指定",
+  "created_at": "2026-08-21T07:47:34.539125+00:00"
+}

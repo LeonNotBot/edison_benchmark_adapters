@@ -1,0 +1,107 @@
+{
+  // Edison 外部 benchmark 标准协议版本；后端用它识别结果格式。
+  "protocol_version": "edison.external_benchmark.v1",
+
+  // 产出该结果的 adapter 名称。
+  "adapter": "omnidocbench",
+
+  // benchmark 名称；通常等于 suite。
+  "benchmark": "OmniDocBench/end2end",
+
+  // 数据集/套件；用于页面展示和矩阵聚合。
+  "suite": "OmniDocBench/end2end",
+
+  // OmniDocBench 无 agent 概念，留空。
+  "agent": "",
+
+  // 本次运行使用的模型标识。
+  "model": "anthropic/claude-sonnet-4-6",
+
+  // 运行标识；OmniDocBench adapter 用 UTC 时间戳。
+  "run_id": "2026-08-19__10-00-00",
+
+  // adapter 归一化状态；completed=正常结束，error=docker/解析异常。
+  "status": "completed",
+
+  // 综合得分（0-1）；4 个维度算术平均：
+  // (text_block + display_formula + table + reading_order) / 4。
+  "score": 0.7798911876002474,
+
+  // 通过率；文档解析场景与 score 保持一致。
+  "pass_rate": 0.7798911876002474,
+
+  // 样本数；OmniDocBench 按整个数据集聚合成 1 条综合结果。
+  "sample_count": 1,
+
+  // 运行级指标与诊断信息。
+  "metrics": {
+    // docker run 端到端耗时（秒）。
+    "duration_seconds": 312.5,
+
+    // 实际使用的官方镜像。
+    "docker_image": "ghcr.io/zeng-weijun/omnidocbench-eval:repro-ubuntu2204",
+
+    // 容器进程返回码。
+    "docker_returncode": 0,
+
+    // 容器 stdout 尾部（截断到 8000 字符），用于 trace。
+    "stdout_tail": "OmniDocBench end2end done",
+
+    // 容器 stderr 尾部，用于失败诊断。
+    "stderr_tail": "",
+
+    // 4 维度分数明细。text_block / reading_order 用 (1 - Edit_dist)，
+    // display_formula 用 CDM，table 用 TEDS。
+    "dimension_scores": {
+      "text_block": 0.6643785245986866,
+      "display_formula": 0.8827391304347827,
+      "table": 0.7967474695389661,
+      "reading_order": 0.7756996258285541,
+      "overall": 0.7798911876002474
+    }
+  },
+
+  // 样本级结果列表；Edison 每项入库为一条 EvalResult。
+  // OmniDocBench 只有一条聚合样本。
+  "samples": [
+    {
+      // 样本唯一 ID。
+      "id": "omnidocbench_end2end",
+
+      // 样本名称，用于前端表格。
+      "name": "end2end",
+
+      // 样本状态。
+      "status": "completed",
+
+      // 样本得分（=综合分）。
+      "score": 0.7798911876002474,
+
+      // 摘要输出，用于 trace 展示。
+      "output": "OmniDocBench end2end overall=0.7799",
+
+      // 样本耗时（秒）。
+      "latency_seconds": 312.5,
+
+      // 样本级原始指标；dimension_scores 为 4 维明细，
+      // raw_metrics 保留 OmniDocBench 完整 metric_result（此处省略，
+      // 真实运行时为完整 JSON，见容器输出 end2end_quick_match_metric_result.json）。
+      "metrics": {
+        "dimension_scores": {
+          "text_block": 0.6643785245986866,
+          "display_formula": 0.8827391304347827,
+          "table": 0.7967474695389661,
+          "reading_order": 0.7756996258285541,
+          "overall": 0.7798911876002474
+        },
+        "raw_metrics": "<省略: 见 result 目录下 end2end_quick_match_metric_result.json>"
+      },
+
+      // 样本错误；成功时为 null。
+      "error": null
+    }
+  ],
+
+  // 运行级错误；成功时 null，失败时放关键错误信息。
+  "error": null
+}

@@ -1,0 +1,87 @@
+{
+  // Edison 外部 benchmark 协议版本；后端识别输入格式用。
+  "protocol_version": "edison.external_benchmark.v1",
+
+  // Edison 任务信息；正式运行由 Edison 生成，本地 smoke 可随意填。
+  "task": {
+    "id": "local-omnidocbench-full",
+    "name": "OmniDocBench end2end full dataset",
+    "description": "OmniDocBench 完整数据集端到端评测（1651样本）",
+    // 评分策略；OmniDocBench 用综合分，填 "score"。
+    "scoring_strategy": "score"
+  },
+
+  // benchmark 运行配置。
+  "benchmark": {
+    // adapter 名称；Edison 用它定位 adapter 目录。
+    "adapter": "omnidocbench",
+
+    // 数据集/套件标识；用于页面展示和结果聚合。
+    "suite": "OmniDocBench/end2end",
+
+    // OmniDocBench 无 agent 概念，留空。
+    "agent": "",
+
+    // 题目数量限制；OmniDocBench 一次评整个数据集，留 null。
+    "limit": null,
+
+    // 运行次数；文档解析评测确定性强，1 即可。
+    "runs": 1,
+
+    // 指定题目短名；OmniDocBench 无此概念，留 null。
+    "task_names": null,
+
+    // OmniDocBench 特有参数：推理配置和可选路径覆盖。
+    "params": {
+      // 以下路径参数**后端自动填充**，前端无需传（后端 _external_benchmark_params
+      // 会设置 gt_json 指向完整数据集 OmniDocBench/full_dataset/OmniDocBench.json，
+      // images_dir 自动推导为同级 images/）：
+      // - gt_json: 默认完整数据集（1651样本），run.sh 自动下载
+      // - images_dir: 默认从 gt_json 同级推导
+      // - predictions_dir: 不设 → 触发自动推理
+      //
+      // 本地测试时需要显式指定 gt_json（示例用相对路径）：
+      "gt_json": "../../OmniDocBench/full_dataset/OmniDocBench.json",
+
+      // VLM 推理可选参数（仅当自动推理时生效）：
+
+      // 最大输出 token 数；默认 16384 对齐官方长文档配置。
+      "vlm_max_tokens": 16384,
+
+      // 采样温度；默认不设，使用模型自身默认值（建议评测时设 0 提高复现性）。
+      "vlm_temperature": 0,
+
+      // 核采样参数；默认不设，使用模型默认。
+      // "vlm_top_p": 0.9,
+
+      // 单张图片 API 调用超时（秒）；默认 120。
+      "vlm_timeout_seconds": 120
+    }
+  },
+
+  // 模型版本配置；来自 Edison 模型管理页。
+  // OmniDocBench adapter 会调用 VLM API 进行端到端推理（图片 → Markdown），
+  // 然后评测生成的 Markdown 与 ground truth 的差异。
+  "model": {
+    "provider": "anthropic",
+    "normalized_provider": "anthropic",
+    "model_identifier": "anthropic/claude-sonnet-4-6",
+    "api_endpoint": "ANTHROPIC_BASE_URL",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+
+  // Edison 与 adapter 约定的输入输出路径。
+  "paths": {
+    // 临时运行目录；adapter 在此建 odb_result/ 存容器输出。
+    "run_dir": "./tmp/local-omnidocbench-smoke/run",
+
+    // adapter 输出目录。
+    "output_dir": "./tmp/local-omnidocbench-smoke/output",
+
+    // adapter 必须写入的 Edison 标准结果文件。
+    "result_json": "./tmp/local-omnidocbench-smoke/output/result.json",
+
+    // 进度快照（可选）。
+    "progress_json": "./tmp/local-omnidocbench-smoke/run/progress.json"
+  }
+}
