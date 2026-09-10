@@ -32,6 +32,8 @@ TERMINUS2_DEFAULT_APT_MIRROR = "http://mirrors.aliyun.com/debian"
 TERMINUS2_DEFAULT_TOOL_INSTALL_TIMEOUT_SEC = 600
 TERMINUS2_DEFAULT_TOOL_INSTALL_BUDGET_SEC = 900
 DEFAULT_CONTAINER_NO_PROXY = "localhost,127.0.0.1,::1"
+MODEL_RATE_LIMIT_EXIT_CODE = 12
+MODEL_RATE_LIMIT_MARKER = "MODEL_RATE_LIMITED"
 
 
 def expand_path(value: str | Path) -> Path:
@@ -172,6 +174,35 @@ def truthy(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def is_model_rate_limit_error(value: Any) -> bool:
+    """Return whether an exception or runner log reports a model-provider 429."""
+    if isinstance(value, urllib.error.HTTPError) and value.code == 429:
+        return True
+    text = str(value or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "ratelimiterror",
+            "temporarily rate-limited upstream",
+            '"code":429',
+            '"code": 429',
+            "upstream_provider_shared_pool",
+        )
+    )
+
+
+def model_rate_limit_message(model: dict[str, Any]) -> str:
+    model_identifier = str(model.get("model_identifier") or "unknown-model")
+    provider = normalize_provider(
+        str(model.get("normalized_provider") or model.get("provider") or "unknown-provider")
+    )
+    return (
+        f"{MODEL_RATE_LIMIT_MARKER}: 模型接口限流，provider={provider} "
+        f"model={model_identifier}。本次评测未产生有效评分，"
+        "请稍后重试或更换模型/provider。"
+    )
 
 
 def harbor_timeout_multiplier(params: dict[str, Any], agent: str) -> float | None:
@@ -568,6 +599,9 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str |
     dataset = str(benchmark.get("suite") or DEFAULT_DATASET).strip() or DEFAULT_DATASET
     limit = int(benchmark.get("limit") or 1)
     runs = int(benchmark.get("runs") or 1)
+    concurrency = int(params.get("concurrency") or params.get("n_concurrent_trials") or 1)
+    if concurrency < 1:
+        concurrency = 1
     task_names = parse_task_names(
         benchmark.get("task_names")
         or benchmark.get("task_name")
@@ -593,7 +627,8 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str |
         harbor_config = {
             "job_name": job_name,
             "jobs_dir": str(harbor_jobs_dir),
-            "n_concurrent_trials": runs,
+            "n_attempts": runs,
+            "n_concurrent_trials": concurrency,
             "timeout_multiplier": float(harbor_timeout_multiplier(params, agent) or 1),
             "agent_timeout_multiplier": float(params.get("agent_timeout_multiplier") or (2 if agent == "hermes" else 1)),
             "verifier_timeout_multiplier": (
@@ -630,8 +665,10 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str |
         agent,
         "-l",
         str(limit),
-        "-n",
+        "--n-attempts",
         str(runs),
+        "-n",
+        str(concurrency),
         "--jobs-dir",
         str(harbor_jobs_dir),
     ]
@@ -1029,6 +1066,7 @@ def run_harbor_streaming(
         start_new_session=True,
     )
     stop_requested = False
+    model_rate_limited = False
 
     def terminate_harbor_process(force: bool = False) -> None:
         if proc.poll() is not None:
@@ -1077,6 +1115,7 @@ def run_harbor_streaming(
     stop_started_at: float | None = None
 
     def consume_queued_output() -> None:
+        nonlocal model_rate_limited, stop_requested
         while True:
             try:
                 label, text = output_queue.get_nowait()
@@ -1088,6 +1127,21 @@ def run_harbor_streaming(
             else:
                 stdout_chunks.append(text)
                 print(text, end="", flush=True)
+            if (
+                not model_rate_limited
+                and truthy((params or {}).get("model_rate_limit_fail_fast"), True)
+                and is_model_rate_limit_error(text)
+            ):
+                model_rate_limited = True
+                stop_requested = True
+                print(
+                    f"[tb2-adapter] {MODEL_RATE_LIMIT_MARKER}: "
+                    "Harbor 运行中检测到模型接口 429，"
+                    "正在终止本次评测，避免继续等待。",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                terminate_harbor_process(force=False)
 
     while True:
         consume_queued_output()
@@ -1118,6 +1172,8 @@ def run_harbor_streaming(
     write_progress(progress_path, jobs_dir, job_name)
     for sig, handler in previous_handlers.items():
         signal.signal(sig, handler)
+    if model_rate_limited:
+        returncode = MODEL_RATE_LIMIT_EXIT_CODE
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 
@@ -1298,6 +1354,12 @@ def main() -> int:
                 flush=True,
             )
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+            rate_limited = is_model_rate_limit_error(exc)
+            error_message = (
+                model_rate_limit_message(model)
+                if rate_limited
+                else f"Model preflight failed before Harbor run: {exc}"
+            )
             write_json(result_json, {
                 "protocol_version": "edison.external_benchmark.v1",
                 "adapter": "terminal-bench-2",
@@ -1308,9 +1370,11 @@ def main() -> int:
                 "score": None,
                 "sample_count": 0,
                 "samples": [],
-                "error": f"Model preflight failed before Harbor run: {exc}",
+                "error": error_message,
                 "metrics": {
                     "preflight_stage": "model_api",
+                    "failure_type": "model_rate_limit" if rate_limited else "model_preflight",
+                    "retryable": rate_limited,
                     "provider": normalize_provider(str(model.get("normalized_provider") or model.get("provider") or "")),
                     "raw_model": model.get("model_identifier") or "",
                     "model": api_model_id(
@@ -1321,8 +1385,8 @@ def main() -> int:
                 },
                 "created_at": now_iso(),
             })
-            print(f"[tb2-adapter] model preflight failed: {exc}", file=sys.stderr, flush=True)
-            return 3
+            print(f"[tb2-adapter] {error_message}", file=sys.stderr, flush=True)
+            return MODEL_RATE_LIMIT_EXIT_CODE if rate_limited else 3
 
     if agent == "hermes" and truthy(params.get("container_agent_preflight"), False):
         try:
@@ -1340,6 +1404,31 @@ def main() -> int:
         params=params,
         agent=agent,
     )
+
+    if returncode == MODEL_RATE_LIMIT_EXIT_CODE or is_model_rate_limit_error(f"{stdout}\n{stderr}"):
+        error_message = model_rate_limit_message(model)
+        write_json(result_json, {
+            "protocol_version": "edison.external_benchmark.v1",
+            "adapter": "terminal-bench-2",
+            "benchmark": benchmark.get("suite") or DEFAULT_DATASET,
+            "agent": agent,
+            "model": model.get("model_identifier") or "",
+            "status": "error",
+            "score": None,
+            "sample_count": 0,
+            "samples": [],
+            "error": error_message,
+            "metrics": {
+                "failure_type": "model_rate_limit",
+                "retryable": True,
+                "harbor_returncode": returncode,
+                "harbor_stdout_tail": stdout[-8000:],
+                "harbor_stderr_tail": stderr[-8000:],
+            },
+            "created_at": now_iso(),
+        })
+        print(f"[tb2-adapter] {error_message}", file=sys.stderr, flush=True)
+        return MODEL_RATE_LIMIT_EXIT_CODE
 
     harbor_result_path = latest_result_file(harbor_jobs_dir, harbor_job_name)
     if not harbor_result_path:
