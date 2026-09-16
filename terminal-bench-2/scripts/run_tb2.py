@@ -217,6 +217,20 @@ def harbor_timeout_multiplier(params: dict[str, Any], agent: str) -> float | Non
     return None
 
 
+def agent_timeout_seconds(params: dict[str, Any]) -> float | None:
+    """Return an explicit per-trial agent execution limit when configured."""
+    value = params.get("agent_timeout_seconds")
+    if value in (None, ""):
+        return None
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"agent_timeout_seconds must be a positive number, got {value!r}")
+    if timeout <= 0:
+        raise ValueError(f"agent_timeout_seconds must be greater than 0, got {timeout}")
+    return timeout
+
+
 def parse_task_names(value: Any) -> list[str]:
     if value is None:
         return []
@@ -540,6 +554,9 @@ def write_container_proxy_compose(run_dir: Path, params: dict[str, Any], proxy_e
 
 def harbor_agent_config_with_runtime_env(agent: str, model: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     config = harbor_agent_config(agent, model)
+    explicit_agent_timeout = agent_timeout_seconds(params)
+    if explicit_agent_timeout is not None:
+        config["override_timeout_sec"] = explicit_agent_timeout
     proxy_env = container_proxy_env_templates(params)
     if proxy_env:
         config["env"] = merge_env_templates(config.get("env") or {}, proxy_env)
@@ -630,7 +647,14 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str |
             "n_attempts": runs,
             "n_concurrent_trials": concurrency,
             "timeout_multiplier": float(harbor_timeout_multiplier(params, agent) or 1),
-            "agent_timeout_multiplier": float(params.get("agent_timeout_multiplier") or (2 if agent == "hermes" else 1)),
+            # An explicit timeout is already expressed in seconds, so do not
+            # multiply it again. Older configs without the new field keep the
+            # existing multiplier behavior for backwards compatibility.
+            "agent_timeout_multiplier": (
+                1.0
+                if agent_timeout_seconds(params) is not None
+                else float(params.get("agent_timeout_multiplier") or (2 if agent == "hermes" else 1))
+            ),
             "verifier_timeout_multiplier": (
                 float(params["verifier_timeout_multiplier"])
                 if params.get("verifier_timeout_multiplier") is not None
@@ -941,6 +965,7 @@ def harbor_progress(jobs_dir: Path, job_name: str | None = None) -> dict[str, An
     running_trials: list[str] = []
     completed_trials: list[str] = []
     errored_trials: list[str] = []
+    recent_trials: list[dict[str, Any]] = []
     for trial_dir in sorted(p for p in job_dir.iterdir() if p.is_dir() and "__" in p.name):
         trial_result_path = trial_dir / "result.json"
         if not trial_result_path.exists():
@@ -948,12 +973,26 @@ def harbor_progress(jobs_dir: Path, job_name: str | None = None) -> dict[str, An
             continue
         try:
             trial = load_json(trial_result_path)
-            if trial.get("exception_info"):
+            exception = trial.get("exception_info") if isinstance(trial.get("exception_info"), dict) else {}
+            if exception:
                 errored_trials.append(trial_dir.name)
             else:
                 completed_trials.append(trial_dir.name)
+            recent_trials.append({
+                "task": normalize_task_id(
+                    trial.get("task_id"),
+                    str(trial.get("task_name") or trial_dir.name),
+                ),
+                "status": "failed" if exception else "completed",
+                "finished_at": trial.get("finished_at"),
+                "timings": trial_timing_metrics(trial),
+                "exception_type": exception.get("exception_type"),
+                "exception_message": str(exception.get("exception_message") or "")[:500] or None,
+            })
         except Exception:
             completed_trials.append(trial_dir.name)
+
+    recent_trials.sort(key=lambda item: str(item.get("finished_at") or ""))
 
     return {
         "source": "terminal-bench-2",
@@ -970,6 +1009,7 @@ def harbor_progress(jobs_dir: Path, job_name: str | None = None) -> dict[str, An
         "running_trials": running_trials,
         "completed_trials": completed_trials[-10:],
         "errored_trials": errored_trials[-10:],
+        "recent_trials": recent_trials[-20:],
         "updated_at": now_iso(),
     }
 
@@ -1110,6 +1150,7 @@ def run_harbor_streaming(
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
+    reported_trial_results: set[Path] = set()
     started = time.monotonic()
     next_heartbeat = started + heartbeat_seconds
     stop_started_at: float | None = None
@@ -1157,6 +1198,7 @@ def run_harbor_streaming(
         if now >= next_heartbeat:
             elapsed = int(now - started)
             write_progress(progress_path, jobs_dir, job_name)
+            log_new_trial_results(jobs_dir, job_name, reported_trial_results)
             print(
                 f"[tb2-adapter] heartbeat elapsed={elapsed}s {progress_hint(jobs_dir, job_name)}",
                 file=sys.stderr,
@@ -1170,6 +1212,7 @@ def run_harbor_streaming(
         thread.join(timeout=2)
     consume_queued_output()
     write_progress(progress_path, jobs_dir, job_name)
+    log_new_trial_results(jobs_dir, job_name, reported_trial_results)
     for sig, handler in previous_handlers.items():
         signal.signal(sig, handler)
     if model_rate_limited:
@@ -1186,6 +1229,71 @@ def seconds_between(started: str | None, finished: str | None) -> float | None:
         return max(0.0, (end - start).total_seconds())
     except Exception:
         return None
+
+
+def trial_timing_metrics(trial: dict[str, Any]) -> dict[str, float | None]:
+    timings: dict[str, float | None] = {
+        "total_seconds": seconds_between(trial.get("started_at"), trial.get("finished_at")),
+    }
+    for output_key, source_key in (
+        ("environment_setup_seconds", "environment_setup"),
+        ("agent_setup_seconds", "agent_setup"),
+        ("agent_execution_seconds", "agent_execution"),
+        ("verifier_seconds", "verifier"),
+    ):
+        timing = trial.get(source_key)
+        timings[output_key] = (
+            seconds_between(timing.get("started_at"), timing.get("finished_at"))
+            if isinstance(timing, dict)
+            else None
+        )
+    return timings
+
+
+def log_new_trial_results(
+    jobs_dir: Path,
+    job_name: str | None,
+    reported_paths: set[Path],
+) -> None:
+    """Print one concise timing line for every newly finished Harbor trial."""
+    job_dir = latest_job_dir(jobs_dir, job_name)
+    if not job_dir:
+        return
+    for result_path in sorted(job_dir.glob("*/result.json")):
+        if result_path in reported_paths:
+            continue
+        try:
+            trial = load_json(result_path)
+        except Exception as exc:
+            print(
+                f"[tb2-adapter] trial result unreadable path={result_path} error={exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            reported_paths.add(result_path)
+            continue
+
+        exception = trial.get("exception_info") if isinstance(trial.get("exception_info"), dict) else {}
+        timings = trial_timing_metrics(trial)
+        task_name = normalize_task_id(
+            trial.get("task_id"),
+            str(trial.get("task_name") or result_path.parent.name),
+        )
+        status = "failed" if exception else "completed"
+        print(
+            "[tb2-adapter] trial finished "
+            f"task={task_name} status={status} "
+            f"total={timings['total_seconds']}s "
+            f"environment_setup={timings['environment_setup_seconds']}s "
+            f"agent_setup={timings['agent_setup_seconds']}s "
+            f"agent_execution={timings['agent_execution_seconds']}s "
+            f"verifier={timings['verifier_seconds']}s "
+            f"exception={exception.get('exception_type') or '-'} "
+            f"message={str(exception.get('exception_message') or '-')[:500]}",
+            file=sys.stderr,
+            flush=True,
+        )
+        reported_paths.add(result_path)
 
 
 def metric_mean(harbor_result: dict[str, Any]) -> float | None:
@@ -1228,6 +1336,7 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
     if reward is None and exception_info:
         reward = 0.0
     duration = seconds_between(trial.get("started_at"), trial.get("finished_at"))
+    timings = trial_timing_metrics(trial)
     output = (
         agent_result.get("message")
         or agent_result.get("output")
@@ -1249,6 +1358,12 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
             "source": trial.get("source"),
             "agent_info": trial.get("agent_info"),
             "verifier_result": verifier,
+            "timings": timings,
+            "exception_type": exception_info.get("exception_type") if exception_info else None,
+            "timed_out": bool(
+                exception_info
+                and "timeout" in str(exception_info.get("exception_type") or "").lower()
+            ),
         },
         "error": json.dumps(exception_info, ensure_ascii=False, default=str) if exception_info else None,
     }
