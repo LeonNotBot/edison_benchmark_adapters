@@ -26,6 +26,7 @@ OFFICIAL_IMAGE = "ghcr.io/zeng-weijun/omnidocbench-eval:repro-ubuntu2204"
 ADAPTER_NAME = "omnidocbench"
 DEFAULT_SUITE = "OmniDocBench/end2end"
 ODB_METRIC_FILE = "end2end_quick_match_metric_result.json"
+EDISON_DEPLOYMENT_PREFIXES = {"moon", "sky"}
 
 VLM_PROMPT = """You are an AI assistant specialized in converting PDF images to Markdown format. Please follow these instructions for the conversion:
 
@@ -59,6 +60,38 @@ def now_iso() -> str:
 
 def expand_path(raw: str) -> Path:
     return Path(raw).expanduser().resolve()
+
+
+def normalize_provider(provider: str) -> str:
+    provider = (provider or "").strip().lower()
+    return {
+        "moon": "openai",
+        "openai-api": "openai",
+        "sky": "anthropic",
+        "claude": "anthropic",
+    }.get(provider, provider)
+
+
+def api_model_id(model_identifier: str, provider: str) -> str:
+    """Return the model name accepted by the configured provider API.
+
+    Edison stores deployment-qualified identifiers such as ``moon/gpt-5.4``
+    and ``sky/anthropic/claude-sonnet-4-6``. Those prefixes select an Edison
+    endpoint and are not part of the model name accepted by that endpoint.
+    """
+    model_identifier = (model_identifier or "").strip()
+    provider = normalize_provider(provider)
+    if "/" not in model_identifier:
+        return model_identifier
+
+    prefix, rest = model_identifier.split("/", 1)
+    normalized_prefix = normalize_provider(prefix)
+    if prefix.lower() in EDISON_DEPLOYMENT_PREFIXES and normalized_prefix == provider:
+        model_identifier = rest
+
+    if provider and model_identifier.startswith(f"{provider}/"):
+        return model_identifier.split("/", 1)[1]
+    return model_identifier
 
 
 def load_json(path: Path) -> dict:
@@ -98,8 +131,9 @@ def call_vlm_api(image_path: Path, model: dict, params: dict) -> str:
 
     支持 Anthropic 原生协议和 OpenAI 兼容协议。
     """
-    provider = (model.get("normalized_provider") or model.get("provider") or "").strip().lower()
-    model_id = (model.get("model_identifier") or "").strip()
+    provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
+    raw_model_id = str(model.get("model_identifier") or "").strip()
+    model_id = api_model_id(raw_model_id, provider)
 
     # endpoint 优先级：model.api_endpoint > 特定 provider 的环境变量(兜底)
     endpoint = (model.get("api_endpoint") or "").strip().rstrip("/")
