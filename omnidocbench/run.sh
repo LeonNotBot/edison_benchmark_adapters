@@ -24,16 +24,44 @@ count_images() {
     \) | wc -l | tr -d ' '
 }
 
+resolve_hf_bin() {
+    if [ -n "${OMNIDOCBENCH_HF_BIN:-}" ]; then
+        if [ -x "${OMNIDOCBENCH_HF_BIN}" ]; then
+            echo "${OMNIDOCBENCH_HF_BIN}"
+            return
+        fi
+        echo "[OmniDocBench] 错误：OMNIDOCBENCH_HF_BIN 不可执行: ${OMNIDOCBENCH_HF_BIN}" >&2
+        return 1
+    fi
+
+    if command -v hf >/dev/null 2>&1; then
+        command -v hf
+        return
+    fi
+
+    # Workers already maintain the inspect_evals uv environment. Celery does
+    # not necessarily include that environment's bin directory in PATH, so
+    # use its hf CLI directly before asking operators to install another copy.
+    local inspect_hf="${REPO_ROOT}/inspect_evals/.venv/bin/hf"
+    if [ -x "${inspect_hf}" ]; then
+        echo "${inspect_hf}"
+        return
+    fi
+
+    return 1
+}
+
 IMG_COUNT="$(count_images)"
 
 if [ ! -f "${GT_FILE}" ] || [ "${IMG_COUNT}" -lt "${EXPECTED_IMAGES}" ]; then
     echo "[OmniDocBench] 数据集不完整（GT存在=$([ -f "${GT_FILE}" ] && echo 是 || echo 否), 图片=${IMG_COUNT}/${EXPECTED_IMAGES}），开始下载/续传到 ${DATASET_DIR} ..." >&2
     mkdir -p "${DATASET_DIR}"
-    if command -v hf &>/dev/null; then
+    if HF_BIN="$(resolve_hf_bin)"; then
         # 下载整个 dataset 仓库：包含 OmniDocBench.json(GT) + images/(1651张图片)
-        hf download opendatalab/OmniDocBench --repo-type dataset --local-dir "${DATASET_DIR}" --quiet
+        echo "[OmniDocBench] 使用 hf CLI: ${HF_BIN}" >&2
+        "${HF_BIN}" download opendatalab/OmniDocBench --repo-type dataset --local-dir "${DATASET_DIR}" --quiet
     else
-        echo "[OmniDocBench] 错误：需要 hf CLI，请安装: pip install 'huggingface-hub[cli]'" >&2
+        echo "[OmniDocBench] 错误：找不到 hf CLI；请先在 inspect_evals 执行 uv sync --frozen，或设置 OMNIDOCBENCH_HF_BIN" >&2
         exit 1
     fi
     IMG_COUNT="$(count_images)"
