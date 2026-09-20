@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 OFFICIAL_IMAGE = "ghcr.io/zeng-weijun/omnidocbench-eval:repro-ubuntu2204"
 ADAPTER_NAME = "omnidocbench"
@@ -119,6 +120,23 @@ def write_progress(progress_path, current: int, total: int, stage: str = "runnin
         })
     except Exception:
         pass
+
+
+def run_streaming_command(command: Sequence[str], stage: str) -> tuple[int, str]:
+    """Run a command while forwarding combined stdout/stderr and retaining a tail."""
+    proc = subprocess.Popen(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_tail = ""
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(f"[OmniDocBench:{stage}] {line}", end="", flush=True)
+        output_tail = (output_tail + line)[-20000:]
+    return proc.wait(), output_tail
 
 
 def get_image_media_type(path: Path) -> str:
@@ -558,17 +576,41 @@ def run(config_path: Path) -> int:
     print(f"[OmniDocBench] image={OFFICIAL_IMAGE}", flush=True)
     print(f"[OmniDocBench] cmd={' '.join(cmd)}", flush=True)
 
-    started = datetime.now(timezone.utc)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    duration = (datetime.now(timezone.utc) - started).total_seconds()
-    print(proc.stdout, flush=True)
-    if proc.stderr:
-        print(proc.stderr, file=sys.stderr, flush=True)
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", OFFICIAL_IMAGE],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if image_check.returncode != 0:
+        print(f"[OmniDocBench] 本地没有评分镜像，开始拉取: {OFFICIAL_IMAGE}", flush=True)
+        pull_returncode, pull_output = run_streaming_command(
+            ["docker", "pull", OFFICIAL_IMAGE],
+            "image-pull",
+        )
+        if pull_returncode != 0:
+            write_json(result_json, error_result(
+                edison_input,
+                f"docker pull 失败 (code={pull_returncode}): {pull_output[-4000:]}",
+            ))
+            return pull_returncode
+        print(f"[OmniDocBench] 评分镜像拉取完成: {OFFICIAL_IMAGE}", flush=True)
+    else:
+        print(f"[OmniDocBench] 使用已缓存评分镜像: {OFFICIAL_IMAGE}", flush=True)
 
-    if proc.returncode != 0:
+    started = datetime.now(timezone.utc)
+    write_progress(
+        progress_path,
+        int(infer_stats.get("total") or 0),
+        int(infer_stats.get("total") or 0),
+        stage="scoring",
+    )
+    returncode, docker_output = run_streaming_command(cmd, "scoring")
+    duration = (datetime.now(timezone.utc) - started).total_seconds()
+
+    if returncode != 0:
         write_json(result_json, error_result(
-            edison_input, f"docker run 失败 (code={proc.returncode}): {proc.stderr[-2000:]}"))
-        return proc.returncode
+            edison_input, f"docker run 失败 (code={returncode}): {docker_output[-4000:]}"))
+        return returncode
 
     metric_file = odb_result / ODB_METRIC_FILE
     if not metric_file.exists():
@@ -581,8 +623,8 @@ def run(config_path: Path) -> int:
     page_samples = build_page_samples(odb_result)
     result = build_result(
         edison_input=edison_input, scores=scores, odb=odb,
-        returncode=proc.returncode, stdout_tail=proc.stdout,
-        stderr_tail=proc.stderr, duration=duration, samples=page_samples,
+        returncode=returncode, stdout_tail=docker_output,
+        stderr_tail="", duration=duration, samples=page_samples,
         infer_stats=infer_stats)
     write_json(result_json, result)
     print(f"[OmniDocBench] result -> {result_json}", flush=True)
