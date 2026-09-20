@@ -59,7 +59,12 @@ if [ ! -f "${GT_FILE}" ] || [ "${IMG_COUNT}" -lt "${EXPECTED_IMAGES}" ]; then
     if HF_BIN="$(resolve_hf_bin)"; then
         # 下载整个 dataset 仓库：包含 OmniDocBench.json(GT) + images/(1651张图片)
         echo "[OmniDocBench] 使用 hf CLI: ${HF_BIN}" >&2
-        "${HF_BIN}" download opendatalab/OmniDocBench --repo-type dataset --local-dir "${DATASET_DIR}" --quiet
+        # Edison workers may run cached Inspect benchmarks with global HF
+        # offline flags. OmniDocBench's first-run bootstrap explicitly needs
+        # network access, so disable offline mode only for this child process.
+        HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0 \
+            "${HF_BIN}" download opendatalab/OmniDocBench \
+            --repo-type dataset --local-dir "${DATASET_DIR}" --quiet
     else
         echo "[OmniDocBench] 错误：找不到 hf CLI；请先在 inspect_evals 执行 uv sync --frozen，或设置 OMNIDOCBENCH_HF_BIN" >&2
         exit 1
