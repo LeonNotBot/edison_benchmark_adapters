@@ -20,7 +20,7 @@ from typing import Any
 
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2"
-SUPPORTED_AGENTS = {"oracle", "hermes", "terminus-2"}
+SUPPORTED_AGENTS = {"oracle", "hermes", "terminus-2", "claude-code"}
 ADAPTER_DIR = Path(__file__).resolve().parents[1]
 HERMES_CONTAINER_PREFLIGHT_DATASET = ADAPTER_DIR / "smoke_tasks"
 HERMES_CONTAINER_PREFLIGHT_TASK_NAME = "edison/hermes-container-preflight"
@@ -268,7 +268,12 @@ def harbor_dataset_config(dataset: str, task_names: list[str], limit: int) -> di
         entry: dict[str, Any] = {"path": dataset}
         normalized_task_names = task_names
     else:
-        entry = {"name": dataset}
+        name, separator, version = dataset.partition("@")
+        if separator and (not name or not version):
+            raise ValueError("Harbor dataset must use name@version with a nonempty version")
+        entry = {"name": name}
+        if separator:
+            entry["version"] = version
         dataset_org = dataset.split("/", 1)[0] if "/" in dataset else ""
         normalized_task_names = [
             task_name if "/" in task_name or not dataset_org else f"{dataset_org}/{task_name}"
@@ -306,7 +311,7 @@ def post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeou
 def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
     model_identifier = str(model.get("model_identifier") or "").strip()
-    request_model = api_model_id(model_identifier, provider)
+    request_model = str(model.get("api_model_identifier") or api_model_id(model_identifier, provider))
     endpoint = model_endpoint(model).strip().rstrip("/")
     api_key = model_api_key(model)
     timeout = float(params.get("model_preflight_timeout_seconds") or 30)
@@ -554,6 +559,27 @@ def write_container_proxy_compose(run_dir: Path, params: dict[str, Any], proxy_e
 
 def harbor_agent_config_with_runtime_env(agent: str, model: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     config = harbor_agent_config(agent, model)
+    if agent == "claude-code":
+        # Harbor forwards the model name verbatim when a custom endpoint is set.
+        # Only the configured endpoint is granted network access by default.
+        from urllib.parse import urlsplit
+
+        host = urlsplit(model_endpoint(model)).hostname
+        config["extra_allowed_hosts"] = list(dict.fromkeys(
+            ([host] if host else []) + parse_task_names(params.get("agent_allowed_hosts"))
+        ))
+        kwargs = {}
+        if params.get("claude_code_version"):
+            version = str(params["claude_code_version"]).strip()
+            if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", version):
+                raise ValueError("claude_code_version must be a version such as 2.1.0")
+            kwargs["version"] = version
+        if params.get("reasoning_effort"):
+            effort = str(params["reasoning_effort"])
+            if effort not in {"low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("Unsupported Claude Code reasoning_effort")
+            kwargs["reasoning_effort"] = effort
+        config["kwargs"] = kwargs
     explicit_agent_timeout = agent_timeout_seconds(params)
     if explicit_agent_timeout is not None:
         config["override_timeout_sec"] = explicit_agent_timeout
@@ -587,6 +613,22 @@ def harbor_environment_config(run_dir: Path, params: dict[str, Any]) -> dict[str
 def harbor_agent_config(agent: str, model: dict[str, Any]) -> dict[str, Any]:
     if agent == "oracle":
         return {"name": "oracle"}
+    if agent == "claude-code":
+        provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
+        if provider != "anthropic" or model.get("api_protocol", "anthropic") != "anthropic":
+            raise ValueError("Claude Code 需要 Anthropic Messages 兼容接口，请选择 provider 为 sky/anthropic 的模型版本；OpenAI Chat Completions 接口不能直接用于此 Agent。")
+        wire_model = str(model.get("api_model_identifier") or api_model_id(str(model.get("model_identifier") or ""), provider)).strip()
+        if not wire_model or not model_endpoint(model):
+            raise ValueError("Claude Code requires a model identifier and API endpoint in the selected model version")
+        return {
+            "name": agent,
+            "model_name": wire_model,
+            "env": {
+                "ANTHROPIC_API_KEY": "${EDISON_MODEL_API_KEY}",
+                "ANTHROPIC_BASE_URL": re.sub(r"/v1$", "", model_endpoint(model).rstrip("/")),
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            },
+        }
     if agent == "hermes":
         return {
             "import_path": EDISON_HERMES_IMPORT_PATH,
@@ -609,8 +651,7 @@ def build_harbor_command(config: dict[str, Any]) -> tuple[list[str], Path, str |
     agent = str(benchmark.get("agent") or "hermes").strip().lower()
     if agent not in SUPPORTED_AGENTS:
         raise ValueError(
-            f"Terminal-Bench 2 adapter currently supports {sorted(SUPPORTED_AGENTS)}, got {agent!r}. "
-            "CCB/OpenClaw should be added here once their Harbor agent names and env contracts are confirmed."
+            f"Terminal-Bench adapter supports {sorted(SUPPORTED_AGENTS)}, got {agent!r}."
         )
 
     dataset = str(benchmark.get("suite") or DEFAULT_DATASET).strip() or DEFAULT_DATASET
@@ -1046,6 +1087,18 @@ def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "")
     """
     params = params or {}
     env = os.environ.copy()
+    if agent == "claude-code":
+        # A worker may carry another model's login/config. Keep this task on
+        # the model version injected by Edison, including all subagent aliases.
+        for key in list(env):
+            if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDE_FORCE_")):
+                env.pop(key, None)
+        env.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+        if os.environ.get("EDISON_MODEL_API_KEY"):
+            env["ANTHROPIC_API_KEY"] = os.environ["EDISON_MODEL_API_KEY"]
+        endpoint = os.environ.get("EDISON_MODEL_API_ENDPOINT", "")
+        if endpoint:
+            env["ANTHROPIC_BASE_URL"] = re.sub(r"/v1$", "", endpoint.rstrip("/"))
 
     # Harbor and its dependencies use httpx, which requires the optional
     # ``socksio`` package for socks proxies. Worker shells may have a stale
@@ -1426,6 +1479,15 @@ def normalize_harbor_result(
     }
 
 
+def check_tb4_runtime(harbor_bin: str) -> str:
+    """Gate TB4 on the Harbor release used for Edison compatibility checks."""
+    result = subprocess.run([harbor_bin, "--version"], capture_output=True, text=True, timeout=20)
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", result.stdout + result.stderr)
+    if result.returncode or not match or tuple(map(int, match.groups())) < (0, 20, 0):
+        raise RuntimeError("TB4 接入要求 Harbor >= 0.20.0（Edison 当前适配基线）；请在独立环境安装并配置 harbor_bin，避免覆盖 TB2 环境。")
+    return match.group(0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -1442,11 +1504,16 @@ def main() -> int:
 
     try:
         command, harbor_jobs_dir, harbor_job_name = build_harbor_command(edison_input)
+        if benchmark.get("agent") == "claude-code" and not os.environ.get("EDISON_MODEL_API_KEY"):
+            raise ValueError("Claude Code 模型版本未注入 API Key，请在模型管理中配置当前版本的密钥。")
+        if str(benchmark.get("suite") or "").startswith("terminal-bench/terminal-bench@4."):
+            version = check_tb4_runtime(command[0])
+            print(f"[tb4-adapter] Harbor runtime: {version}", flush=True)
     except Exception as exc:
         write_json(result_json, {
             "protocol_version": "edison.external_benchmark.v1",
             "adapter": "terminal-bench-2",
-            "benchmark": DEFAULT_DATASET,
+            "benchmark": benchmark.get("suite") or DEFAULT_DATASET,
             "status": "error",
             "score": None,
             "sample_count": 0,
@@ -1550,7 +1617,7 @@ def main() -> int:
         write_json(result_json, {
             "protocol_version": "edison.external_benchmark.v1",
             "adapter": "terminal-bench-2",
-            "benchmark": DEFAULT_DATASET,
+            "benchmark": benchmark.get("suite") or DEFAULT_DATASET,
             "status": "error",
             "score": None,
             "sample_count": 0,
