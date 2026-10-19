@@ -8,6 +8,7 @@ import queue
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ from typing import Any
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2"
 SUPPORTED_AGENTS = {"oracle", "hermes", "terminus-2", "claude-code"}
 ADAPTER_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_CLAUDE_CACHE_DIR = ADAPTER_DIR.parents[1] / "claude-code-cache"
 HERMES_CONTAINER_PREFLIGHT_DATASET = ADAPTER_DIR / "smoke_tasks"
 HERMES_CONTAINER_PREFLIGHT_TASK_NAME = "edison/hermes-container-preflight"
 HERMES_CONTAINER_PREFLIGHT_LOCAL_TASK_FILTER = "hermes-container-preflight"
@@ -302,8 +304,23 @@ def safe_harbor_job_name(config: dict[str, Any]) -> str:
 def post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read().decode("utf-8", errors="replace")
+    deadline = time.monotonic() + timeout
+    for attempt in range(2):
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("model preflight timeout")
+            with urllib.request.urlopen(request, timeout=remaining) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+            break
+        except (urllib.error.URLError, ssl.SSLError) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            # Retry only an unexpected TLS EOF, never certificate/auth errors.
+            # This tiny preflight may be replayed; benchmark trials are unaffected.
+            if attempt or not isinstance(reason, ssl.SSLEOFError) or deadline - time.monotonic() <= 1:
+                raise
+            print("[model-preflight] TLS connection closed unexpectedly; retrying once in 1s", file=sys.stderr, flush=True)
+            time.sleep(1)
     data = json.loads(raw) if raw else {}
     return data if isinstance(data, dict) else {"data": data}
 
@@ -557,6 +574,24 @@ def write_container_proxy_compose(run_dir: Path, params: dict[str, Any], proxy_e
     return path
 
 
+def claude_cache_config(params: dict[str, Any]) -> tuple[Path, str] | None:
+    if not truthy(params.get("use_claude_cache"), True):
+        return None
+    explicit = params.get("claude_code_cache_dir") or os.environ.get("EDISON_CLAUDE_CODE_CACHE_DIR")
+    root = expand_path(explicit or DEFAULT_CLAUDE_CACHE_DIR)
+    marker = root / "DEFAULT_VERSION"
+    if not explicit and not marker.is_file():
+        return None
+    version = str(params.get("claude_code_version") or "").strip()
+    if not version:
+        if not marker.is_file():
+            raise ValueError(f"Claude cache requires DEFAULT_VERSION or claude_code_version: {root}")
+        version = marker.read_text().strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", version):
+        raise ValueError("Claude cache requires an exact version")
+    return root, version
+
+
 def harbor_agent_config_with_runtime_env(agent: str, model: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     config = harbor_agent_config(agent, model)
     if agent == "claude-code":
@@ -574,6 +609,10 @@ def harbor_agent_config_with_runtime_env(agent: str, model: dict[str, Any], para
             if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", version):
                 raise ValueError("claude_code_version must be a version such as 2.1.0")
             kwargs["version"] = version
+        cache = claude_cache_config(params)
+        if cache:
+            kwargs["version"] = cache[1]
+            config["env"]["DISABLE_AUTOUPDATER"] = "1"
         if params.get("reasoning_effort"):
             effort = str(params["reasoning_effort"])
             if effort not in {"low", "medium", "high", "xhigh", "max"}:
@@ -1120,6 +1159,24 @@ def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "")
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
+    env.pop("EDISON_TB4_PATCH_CLAUDE_APT", None)
+    env.pop("EDISON_TB4_CLAUDE_APT_MIRROR", None)
+    env.pop("EDISON_TB4_CLAUDE_CACHE_DIR", None)
+    env.pop("EDISON_TB4_CLAUDE_CACHE_VERSION", None)
+    if agent == "claude-code":
+        cache = claude_cache_config(params)
+        if cache:
+            env["EDISON_TB4_CLAUDE_CACHE_DIR"] = str(cache[0])
+            env["EDISON_TB4_CLAUDE_CACHE_VERSION"] = cache[1]
+    if agent == "claude-code" and truthy(params.get("patch_claude_apt"), True):
+        env["EDISON_TB4_PATCH_CLAUDE_APT"] = "1"
+        mirror = str(params.get("container_apt_mirror") or "").strip().rstrip("/")
+        # Older Edison tasks carry this built-in HTTP default. Use its HTTPS
+        # equivalent for Claude setup; leave custom/internal mirrors untouched.
+        if mirror == "http://mirrors.aliyun.com/debian":
+            mirror = "https://mirrors.aliyun.com/debian"
+        env["EDISON_TB4_CLAUDE_APT_MIRROR"] = mirror
+
     if agent == "terminus-2" and truthy(params.get("patch_terminus_apt"), True):
         env["EDISON_TB2_PATCH_TERMINUS_APT"] = "1"
         env["EDISON_TB2_APT_MIRROR"] = str(
@@ -1504,6 +1561,10 @@ def main() -> int:
 
     try:
         command, harbor_jobs_dir, harbor_job_name = build_harbor_command(edison_input)
+        if benchmark.get("agent") == "claude-code":
+            cache = claude_cache_config(params)
+            if cache:
+                print(f"[edison-claude-cache] Worker cache enabled: {cache[0]}; version={cache[1]}", flush=True)
         if benchmark.get("agent") == "claude-code" and not os.environ.get("EDISON_MODEL_API_KEY"):
             raise ValueError("Claude Code 模型版本未注入 API Key，请在模型管理中配置当前版本的密钥。")
         if str(benchmark.get("suite") or "").startswith("terminal-bench/terminal-bench@4."):
