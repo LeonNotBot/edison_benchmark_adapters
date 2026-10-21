@@ -1178,6 +1178,19 @@ def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "",
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
+    # Separate verifier environments drop extra compose files, but retain
+    # proxy env. Reapply only proxy networking, never agent mounts/services.
+    env.pop("EDISON_TB_PROXY_NETWORK_PATCH", None)
+    env.pop("EDISON_TB_PROXY_HOST_ALIAS", None)
+    proxy_env = container_proxy_env_templates(params)
+    if proxy_env:
+        env["EDISON_TB_PROXY_NETWORK_PATCH"] = "1"
+        needs_gateway = "host.docker.internal" in " ".join(proxy_env.values()).lower()
+        if truthy(params.get("container_proxy_host_gateway"), needs_gateway):
+            env["EDISON_TB_PROXY_HOST_ALIAS"] = str(
+                params.get("container_proxy_host_alias") or "host.docker.internal:host-gateway"
+            ).strip()
+
     env.pop("EDISON_TB4_PATCH_CLAUDE_APT", None)
     env.pop("EDISON_TB4_CLAUDE_APT_MIRROR", None)
     env.pop("EDISON_TB4_CLAUDE_CACHE_DIR", None)

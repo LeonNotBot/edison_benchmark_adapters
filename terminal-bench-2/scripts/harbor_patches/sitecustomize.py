@@ -127,3 +127,7 @@ def _patch_claude_code_install() -> None:
 
 _patch_terminus2_tool_install()
 _patch_claude_code_install()
+
+if _truthy(os.environ.get("EDISON_TB_PROXY_NETWORK_PATCH")):
+    from proxy_network import patch_docker_proxy_network
+    patch_docker_proxy_network()
