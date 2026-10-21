@@ -325,7 +325,20 @@ def post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeou
     return data if isinstance(data, dict) else {"data": data}
 
 
-def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+def claude_connection(model: dict[str, Any]) -> tuple[str, str, bool]:
+    """Select the Messages transport without changing Edison's shared model config."""
+    provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
+    openrouter = provider == "openrouter"
+    if not openrouter and (provider != "anthropic" or model.get("api_protocol", "anthropic") != "anthropic"):
+        raise ValueError("Claude Code 需要 Anthropic Messages 兼容接口，请选择 sky/anthropic 或 OpenRouter 模型版本；普通 OpenAI Chat Completions 接口不能直接用于此 Agent。")
+    wire_model = api_model_id(str(model.get("api_model_identifier") or model.get("model_identifier") or ""), provider).strip()
+    base = re.sub(r"/v1$", "", model_endpoint(model).strip().rstrip("/"))
+    if not wire_model or not base:
+        raise ValueError("Claude Code requires a model identifier and API endpoint in the selected model version")
+    return wire_model, base, openrouter
+
+
+def model_preflight(model: dict[str, Any], params: dict[str, Any], agent: str = "") -> dict[str, Any]:
     provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
     model_identifier = str(model.get("model_identifier") or "").strip()
     request_model = str(model.get("api_model_identifier") or api_model_id(model_identifier, provider))
@@ -341,11 +354,15 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
     if not endpoint:
         raise RuntimeError("model preflight failed: missing api_endpoint")
 
-    if provider == "anthropic":
-        api_key = model_api_key(model, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    if provider == "anthropic" or agent == "claude-code":
+        bearer = False
+        if agent == "claude-code":
+            request_model, base, bearer = claude_connection(model)
+        else:
+            base = re.sub(r"/v1$", "", endpoint)
+        api_key = model_api_key(model, "EDISON_MODEL_API_KEY", *(('OPENROUTER_API_KEY',) if bearer else ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN')))
         if not api_key:
-            raise RuntimeError("model preflight failed: missing ANTHROPIC_API_KEY")
-        base = re.sub(r"/v1$", "", endpoint)
+            raise RuntimeError(f"model preflight failed: missing {provider.upper()} API key")
         payload = {
             "model": request_model,
             "max_tokens": 8,
@@ -355,7 +372,7 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
             f"{base}/v1/messages",
             {
                 "content-type": "application/json",
-                "x-api-key": api_key,
+                **({"authorization": f"Bearer {api_key}"} if bearer else {"x-api-key": api_key}),
                 "anthropic-version": "2023-06-01",
             },
             payload,
@@ -394,7 +411,7 @@ def model_preflight(model: dict[str, Any], params: dict[str, Any]) -> dict[str, 
         "provider": provider,
         "model": request_model,
         "raw_model": model_identifier,
-        "harbor_model": normalize_hermes_harbor_model(model),
+        "harbor_model": request_model if agent == "claude-code" else normalize_hermes_harbor_model(model),
         "duration_seconds": round(time.monotonic() - started, 3),
         "response_keys": sorted(data.keys())[:20],
     }
@@ -653,18 +670,14 @@ def harbor_agent_config(agent: str, model: dict[str, Any]) -> dict[str, Any]:
     if agent == "oracle":
         return {"name": "oracle"}
     if agent == "claude-code":
-        provider = normalize_provider(str(model.get("normalized_provider") or model.get("provider") or ""))
-        if provider != "anthropic" or model.get("api_protocol", "anthropic") != "anthropic":
-            raise ValueError("Claude Code 需要 Anthropic Messages 兼容接口，请选择 provider 为 sky/anthropic 的模型版本；OpenAI Chat Completions 接口不能直接用于此 Agent。")
-        wire_model = str(model.get("api_model_identifier") or api_model_id(str(model.get("model_identifier") or ""), provider)).strip()
-        if not wire_model or not model_endpoint(model):
-            raise ValueError("Claude Code requires a model identifier and API endpoint in the selected model version")
+        wire_model, base, bearer = claude_connection(model)
         return {
             "name": agent,
             "model_name": wire_model,
             "env": {
-                "ANTHROPIC_API_KEY": "${EDISON_MODEL_API_KEY}",
-                "ANTHROPIC_BASE_URL": re.sub(r"/v1$", "", model_endpoint(model).rstrip("/")),
+                "ANTHROPIC_API_KEY": "" if bearer else "${EDISON_MODEL_API_KEY}",
+                "ANTHROPIC_AUTH_TOKEN": "${EDISON_MODEL_API_KEY}" if bearer else "",
+                "ANTHROPIC_BASE_URL": base,
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             },
         }
@@ -1116,7 +1129,7 @@ def _stream_reader(stream: Any, label: str, output_queue: "queue.Queue[tuple[str
             pass
 
 
-def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "") -> dict[str, str]:
+def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "", model: dict[str, Any] | None = None) -> dict[str, str]:
     """Return environment for the Harbor child process.
 
     Harbor imports custom agents from ``import_path`` in the generated config.
@@ -1138,6 +1151,12 @@ def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "")
         endpoint = os.environ.get("EDISON_MODEL_API_ENDPOINT", "")
         if endpoint:
             env["ANTHROPIC_BASE_URL"] = re.sub(r"/v1$", "", endpoint.rstrip("/"))
+        if model is not None:
+            _, base, bearer = claude_connection(model)
+            env["ANTHROPIC_BASE_URL"] = base
+            if bearer:
+                env["ANTHROPIC_API_KEY"] = ""
+                env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get("EDISON_MODEL_API_KEY", "")
 
     # Harbor and its dependencies use httpx, which requires the optional
     # ``socksio`` package for socks proxies. Worker shells may have a stale
@@ -1205,6 +1224,7 @@ def run_harbor_streaming(
     job_name: str | None = None,
     params: dict[str, Any] | None = None,
     agent: str = "",
+    model: dict[str, Any] | None = None,
 ) -> tuple[int, str, str]:
     proc = subprocess.Popen(
         command,
@@ -1212,7 +1232,7 @@ def run_harbor_streaming(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=1,
-        env=harbor_subprocess_env(params=params, agent=agent),
+        env=harbor_subprocess_env(params=params, agent=agent, model=model),
         start_new_session=True,
     )
     stop_requested = False
@@ -1588,7 +1608,7 @@ def main() -> int:
     agent = str(benchmark.get("agent") or "hermes").strip().lower()
     if agent != "oracle" and truthy(params.get("model_preflight"), True):
         try:
-            preflight = model_preflight(model, params)
+            preflight = model_preflight(model, params, agent=agent)
             print(
                 "[tb2-adapter] model preflight ok: "
                 f"provider={preflight['provider']} model={preflight['model']} "
@@ -1646,6 +1666,7 @@ def main() -> int:
         job_name=harbor_job_name,
         params=params,
         agent=agent,
+        model=model,
     )
 
     if returncode == MODEL_RATE_LIMIT_EXIT_CODE or is_model_rate_limit_error(f"{stdout}\n{stderr}"):

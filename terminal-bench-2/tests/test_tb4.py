@@ -65,7 +65,7 @@ def test_claude_model_prefix(tmp_path, identifier, expected):
     assert adapter.harbor_agent_config("claude-code", model)["model_name"] == expected
 
 
-@pytest.mark.parametrize("provider", ["moon", "openai", "openrouter"])
+@pytest.mark.parametrize("provider", ["moon", "openai"])
 def test_claude_rejects_wrong_protocol(tmp_path, provider):
     model = config(tmp_path)["model"]
     model.update(provider=provider, normalized_provider=provider)
