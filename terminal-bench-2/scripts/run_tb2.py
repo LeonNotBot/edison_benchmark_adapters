@@ -578,13 +578,10 @@ def write_container_proxy_compose(run_dir: Path, params: dict[str, Any], proxy_e
     if not proxy_env:
         return None
 
-    proxy_values = " ".join(proxy_env.values()).lower()
-    needs_host_gateway = "host.docker.internal" in proxy_values
+    # Host mappings are added by proxy_network after Harbor knows the task's
+    # networking. Adding extra_hosts to main here breaks network_mode: service:*
+    # and Harbor's separate verifier egress sidecar.
     service_config: dict[str, Any] = {"environment": proxy_env}
-    if truthy(params.get("container_proxy_host_gateway"), needs_host_gateway):
-        host_alias = str(params.get("container_proxy_host_alias") or "host.docker.internal:host-gateway").strip()
-        if host_alias:
-            service_config["extra_hosts"] = [host_alias]
 
     path = run_dir / "container_proxy_compose.json"
     write_json(path, {"services": {"main": service_config}})

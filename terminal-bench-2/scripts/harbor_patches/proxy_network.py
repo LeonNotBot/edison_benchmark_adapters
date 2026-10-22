@@ -61,6 +61,54 @@ def proxy_safe_env(environment, env: dict[str, str] | None) -> dict[str, str] | 
     return result
 
 
+def proxy_hosts_service(environment) -> str:
+    """Find the service owning main's network namespace and /etc/hosts.
+
+    Docker rejects extra_hosts on a container sharing another container's
+    network. Its hosts file is inherited from the network owner instead.
+    Follow task-authored service chains as well as Harbor's egress overlay;
+    never change the task's network mode or bypass its egress policy.
+    """
+    import yaml
+
+    modes = {"main": ""}
+    paths = [environment._environment_docker_compose_path, *environment.extra_docker_compose_paths]
+    for path in paths:
+        if not path.is_file():
+            continue
+        document = yaml.safe_load(path.read_text()) or {}
+        for name, config in document.get("services", {}).items():
+            modes.setdefault(name, "")
+            if isinstance(config, dict) and "network_mode" in config:
+                modes[name] = str(config["network_mode"] or "")
+
+    if getattr(environment, "_enable_egress_control", False):
+        sidecar = environment._EGRESS_CONTROL_SERVICE_NAME
+        modes.setdefault(sidecar, "")
+        for name in environment._egress_controlled_service_names():
+            modes[name] = f"service:{sidecar}"
+
+    service = "main"
+    visited = set()
+    while True:
+        if service in visited or service not in modes:
+            raise ValueError("Cannot place proxy host mapping: invalid network_mode service chain")
+        visited.add(service)
+        mode = modes[service]
+        if "$" in mode or mode.startswith("container:"):
+            # An external container cannot be modified through this compose
+            # project. Require an explicit configuration rather than silently
+            # losing proxy access or changing someone else's container.
+            raise ValueError(
+                "Cannot place proxy host mapping on an external or unresolved network_mode. "
+                "Use a reachable proxy IP, or configure the network owner's host mapping "
+                "and set container_proxy_host_gateway=false."
+            )
+        if not mode.startswith("service:"):
+            return service
+        service = mode.removeprefix("service:")
+
+
 def patch_docker_proxy_network() -> None:
     from harbor.environments.docker.docker import DockerEnvironment
 
@@ -81,8 +129,9 @@ def patch_docker_proxy_network() -> None:
         alias = os.environ.get("EDISON_TB_PROXY_HOST_ALIAS", "")
         if alias:
             data = json.loads(path.read_text())
-            main = data.setdefault("services", {}).setdefault("main", {})
-            main.setdefault("extra_hosts", []).append(alias)
+            owner = proxy_hosts_service(self)
+            service = data.setdefault("services", {}).setdefault(owner, {})
+            service.setdefault("extra_hosts", []).append(alias)
             path.write_text(json.dumps(data, indent=2))
         return path
 

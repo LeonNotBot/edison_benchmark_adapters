@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -112,3 +113,105 @@ env._cleanup_env_compose_file()
     result = subprocess.run([sys.executable, "-c", script, str(tmp_path)], env=child,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_proxy_override_defers_host_mapping_until_network_mode_is_known(tmp_path):
+    path = adapter.write_container_proxy_compose(
+        tmp_path, {"container_proxy_url": PROXY["HTTP_PROXY"]}, PROXY)
+    assert json.loads(path.read_text()) == {"services": {"main": {"environment": PROXY}}}
+
+
+@pytest.mark.parametrize("services,egress,owner", [
+    ({"main": {}}, False, "main"),
+    ({"main": {"network_mode": "service:api"}, "api": {}}, False, "api"),
+    ({"main": {"network_mode": "service:api"}, "api": {"network_mode": "service:net"}, "net": {}}, False, "net"),
+    ({"main": {}}, True, "harbor-docker-egress-control-sidecar"),
+    ({"main": {"network_mode": "service:api"}, "api": {}}, True, "harbor-docker-egress-control-sidecar"),
+    ({"main": {"networks": ["default"]}}, True, "main"),
+])
+def test_real_harbor_compose_shared_network_mapping(tmp_path, services, egress, owner):
+    """Render with real Compose + Harbor; no daemon, images or paid model needed."""
+    if not shutil.which("docker"):
+        pytest.skip("Docker Compose CLI required for merged-config regression")
+    task_compose = tmp_path / "docker-compose.yaml"
+    task_compose.write_text(json.dumps({"services": {
+        name: {"image": "alpine:3.20", **config} for name, config in services.items()
+    }}))
+    proxy_compose = adapter.write_container_proxy_compose(tmp_path, {}, PROXY)
+    script = '''
+import contextvars, json, subprocess, sys
+from pathlib import Path
+from types import SimpleNamespace
+from harbor.environments.docker.docker import DockerEnvironment
+env = object.__new__(DockerEnvironment)
+env.environment_dir = Path(sys.argv[1])
+env.extra_docker_compose_paths = [env.environment_dir / "container_proxy_compose.json"]
+env.task_env_config = SimpleNamespace(env={})
+env._persistent_env = {"HTTP_PROXY": "http://host.docker.internal:7892"}
+env._exec_env_overlays = contextvars.ContextVar("overlays", default=())
+env._env_compose_temp_dir = None
+env._env_compose_path = None
+env._egress_control_services_compose_temp_dir = None
+env._egress_control_services_compose_path = None
+env._enable_egress_control = sys.argv[2] == "True"
+# Match Harbor start() ordering: environment overlay precedes egress overlay.
+path = env._write_env_compose_file()
+paths = [env._environment_docker_compose_path, *env.extra_docker_compose_paths, path]
+env._write_egress_control_services_compose_file()
+if env._enable_egress_control:
+    paths.append(env._DOCKER_COMPOSE_EGRESS_CONTROL_PATH)
+    if env._egress_control_services_compose_path:
+        paths.append(env._egress_control_services_compose_path)
+command = ["docker", "compose", "--project-name", "edison-proxy-regression"]
+for p in paths:
+    command.extend(["-f", str(p)])
+command.extend(["config", "--format", "json"])
+rendered = subprocess.run(command, capture_output=True, text=True, timeout=20)
+assert rendered.returncode == 0, rendered.stderr
+data = json.loads(rendered.stdout)
+services = data["services"]
+owner = sys.argv[3]
+hosts = services[owner]["extra_hosts"]
+if isinstance(hosts, list):
+    hosts = dict(item.replace(":", "=", 1).split("=", 1) for item in hosts)
+assert hosts == {"host.docker.internal": "host-gateway"}, hosts
+for name, config in services.items():
+    if name != owner:
+        assert not config.get("extra_hosts"), (name, config)
+    if config.get("network_mode", "").startswith(("service:", "container:")):
+        assert not config.get("extra_hosts"), (name, config)
+assert services["main"]["environment"]["HTTP_PROXY"] == "http://host.docker.internal:7892"
+assert "localhost" in services["main"]["environment"]["NO_PROXY"]
+original = json.loads(env._environment_docker_compose_path.read_text())["services"]
+for name, config in original.items():
+    if "network_mode" in config:
+        assert services[name]["network_mode"] == config["network_mode"]
+if env._enable_egress_control:
+    sidecar = env._EGRESS_CONTROL_SERVICE_NAME
+    for name in env._egress_controlled_service_names():
+        assert services[name]["network_mode"] == "service:" + sidecar
+    assert "NET_ADMIN" in services[sidecar]["cap_add"]
+env._cleanup_env_compose_file()
+env._cleanup_egress_control_services_compose_file()
+'''
+    child = adapter.harbor_subprocess_env({"container_proxy_url": PROXY["HTTP_PROXY"]})
+    child.update(PYTHONDONTWRITEBYTECODE="1", EGRESS_CONTROL_SIDECAR_IMAGE_NAME="alpine:3.20")
+    result = subprocess.run([sys.executable, "-c", script, str(tmp_path), str(egress), owner],
+                            env=child, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # The authored compose and reusable proxy override were not rewritten.
+    assert "extra_hosts" not in proxy_compose.read_text()
+    assert "extra_hosts" not in task_compose.read_text()
+
+
+@pytest.mark.parametrize("services", [
+    {"main": {"network_mode": "container:external"}},
+    {"main": {"network_mode": "service:missing"}},
+    {"main": {"network_mode": "service:api"}, "api": {"network_mode": "service:main"}},
+    {"main": {"network_mode": "${TASK_NETWORK_MODE}"}},
+])
+def test_unsupported_network_owner_fails_before_docker_create(tmp_path, services):
+    env = fake_environment(tmp_path)
+    env._environment_docker_compose_path.write_text(json.dumps({"services": services}))
+    with pytest.raises(ValueError, match="Cannot place proxy host mapping"):
+        patch.proxy_hosts_service(env)
