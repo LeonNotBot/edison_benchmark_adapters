@@ -161,3 +161,36 @@ trial.mkdir(parents=True)
     assert output["status"] == "completed" and output["score"] == 1.0
     assert output["samples"][0]["output"] == "fixture output"
     assert (tmp_path / "progress.json").exists()
+
+
+def test_adapter_resource_preflight_failure_is_structured_and_not_a_zero_score(tmp_path):
+    fake = tmp_path / "fake-harbor"
+    fake.write_text(f"#!{sys.executable}\n" + '''import json, sys
+from pathlib import Path
+if '--version' in sys.argv:
+    print('0.20.0'); sys.exit(0)
+from harbor.job import Job
+assert getattr(Job._run_trials_with_queue, '_edison_resource_preflight', False)
+c = json.loads(Path(sys.argv[sys.argv.index('--config') + 1]).read_text())
+job = Path(c['jobs_dir']) / c['job_name']
+job.mkdir(parents=True)
+(job / 'resource-preflight.json').write_text(json.dumps({
+    'status': 'failed', 'checked_tasks': 33, 'checks': [
+        {'task': 'gpu-task', 'phase': 'agent', 'error': 'Task requires 1 GPU(s)'}]}))
+sys.exit(1)
+''')
+    fake.chmod(0o755)
+    c = config(tmp_path, agent="oracle")
+    c["benchmark"]["params"].update(harbor_bin=str(fake), model_preflight=False)
+    input_file = tmp_path / "input.json"
+    input_file.write_text(json.dumps(c))
+    result = subprocess.run([sys.executable, str(SCRIPT), "--config", str(input_file)],
+                            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 1, result.stdout + result.stderr
+    output = json.loads((tmp_path / "result.json").read_text())
+    assert output["status"] == "error" and output["score"] is None
+    assert output["samples"] == []
+    assert output["metrics"]["failure_type"] == "resource_preflight"
+    assert "gpu-task" in output["error"]
+    assert "gpu-task" in result.stderr

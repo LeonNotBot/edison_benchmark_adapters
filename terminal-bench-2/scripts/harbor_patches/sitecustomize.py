@@ -128,6 +128,12 @@ def _patch_claude_code_install() -> None:
 _patch_terminus2_tool_install()
 _patch_claude_code_install()
 
+if _truthy(os.environ.get("EDISON_TB_RESOURCE_PREFLIGHT")):
+    from docker_gpu import patch_docker_gpu
+    patch_docker_gpu()
+    from resource_preflight import patch_job_resource_preflight
+    patch_job_resource_preflight()
+
 if _truthy(os.environ.get("EDISON_TB_PROXY_NETWORK_PATCH")):
     from proxy_network import patch_docker_proxy_network
     patch_docker_proxy_network()

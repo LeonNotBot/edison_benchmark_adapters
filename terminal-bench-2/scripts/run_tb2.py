@@ -1136,6 +1136,9 @@ def harbor_subprocess_env(params: dict[str, Any] | None = None, agent: str = "",
     """
     params = params or {}
     env = os.environ.copy()
+    env.pop("EDISON_TB_RESOURCE_PREFLIGHT", None)
+    if params.get("_resource_preflight"):
+        env["EDISON_TB_RESOURCE_PREFLIGHT"] = "1"
     if agent == "claude-code":
         # A worker may carry another model's login/config. Keep this task on
         # the model version injected by Edison, including all subagent aliases.
@@ -1586,6 +1589,7 @@ def main() -> int:
     benchmark = edison_input.get("benchmark") if isinstance(edison_input.get("benchmark"), dict) else {}
     params = benchmark.get("params") if isinstance(benchmark.get("params"), dict) else {}
     model = edison_input.get("model") if isinstance(edison_input.get("model"), dict) else {}
+    params = {**params, "_resource_preflight": str(benchmark.get("suite") or "").startswith("terminal-bench/terminal-bench@4.")}
     result_json = expand_path(str(paths.get("result_json") or "result.json"))
     progress_json = expand_path(str(paths["progress_json"])) if paths.get("progress_json") else None
 
@@ -1703,6 +1707,24 @@ def main() -> int:
         })
         print(f"[tb2-adapter] {error_message}", file=sys.stderr, flush=True)
         return MODEL_RATE_LIMIT_EXIT_CODE
+
+    resource_report = harbor_jobs_dir / harbor_job_name / "resource-preflight.json"
+    if params.get("_resource_preflight") and returncode and resource_report.is_file():
+        report = load_json(resource_report)
+        if report.get("status") == "failed":
+            failures = [row for row in report["checks"] if row.get("error")]
+            message = "本批次资源预检未通过，尚未启动任何新题目：\n" + "\n".join(
+                f"- {row['task']} [{row['phase']}]: {row['error']}" for row in failures)
+            write_json(result_json, {
+                "protocol_version": "edison.external_benchmark.v1", "adapter": "terminal-bench-2",
+                "benchmark": benchmark.get("suite"), "status": "error", "score": None,
+                "sample_count": 0, "samples": [], "error": message,
+                "metrics": {"failure_type": "resource_preflight", "preflight_stage": "task_resources",
+                            "resource_preflight": report, "resource_preflight_path": str(resource_report)},
+                "created_at": now_iso(),
+            })
+            print(f"[tb4-adapter] {message}", file=sys.stderr, flush=True)
+            return returncode
 
     harbor_result_path = latest_result_file(harbor_jobs_dir, harbor_job_name)
     if not harbor_result_path:
