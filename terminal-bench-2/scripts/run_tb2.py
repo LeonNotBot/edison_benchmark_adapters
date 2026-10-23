@@ -1476,7 +1476,10 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
 
     agent_result = trial.get("agent_result") if isinstance(trial.get("agent_result"), dict) else {}
     exception_info = trial.get("exception_info") if isinstance(trial.get("exception_info"), dict) else None
-    if reward is None and exception_info:
+    resource_skipped = bool(exception_info and exception_info.get("exception_type") == "ResourcePreflightError")
+    if resource_skipped:
+        reward = None
+    elif reward is None and exception_info:
         reward = 0.0
     duration = seconds_between(trial.get("started_at"), trial.get("finished_at"))
     timings = trial_timing_metrics(trial)
@@ -1503,6 +1506,7 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
             "verifier_result": verifier,
             "timings": timings,
             "exception_type": exception_info.get("exception_type") if exception_info else None,
+            "resource_skipped": resource_skipped,
             "timed_out": bool(
                 exception_info
                 and "timeout" in str(exception_info.get("exception_type") or "").lower()
@@ -1540,9 +1544,16 @@ def normalize_harbor_result(
         if p.parent != job_dir
     )
     samples = [normalize_trial_result(path) for path in trial_files]
+    run_indices: dict[str, int] = {}
+    for sample in samples:
+        run_indices[sample["id"]] = run_indices.get(sample["id"], 0) + 1
+        sample["run_index"] = run_indices[sample["id"]]
+    skipped_count = sum(bool(sample["metrics"].get("resource_skipped")) for sample in samples)
     scores = [sample["score"] for sample in samples if isinstance(sample.get("score"), (int, float))]
-    mean_score = sum(scores) / len(scores) if scores else metric_mean(harbor_result)
+    mean_score = sum(scores) / len(scores) if scores else (None if skipped_count else metric_mean(harbor_result))
     status = "completed" if returncode == 0 and not any(sample.get("status") == "error" for sample in samples) else "error"
+    if returncode == 0 and skipped_count:
+        status = "completed_with_errors"
     duration = seconds_between(harbor_result.get("started_at"), harbor_result.get("finished_at"))
     return {
         "protocol_version": "edison.external_benchmark.v1",
@@ -1563,6 +1574,12 @@ def normalize_harbor_result(
             "harbor_stdout_tail": stdout[-8000:],
             "harbor_stderr_tail": stderr[-8000:],
             "harbor_stats": harbor_result.get("stats"),
+            "resource_skipped_samples": skipped_count,
+            "scored_samples": len(scores),
+            "score_scope": "available_samples_excluding_resource_skips" if skipped_count else "all_samples",
+            "coverage": len(scores) / len(samples) if samples else 0,
+            "warning": (f"{skipped_count} 个样本因资源不满足而未执行；均分不包含这些样本，不能当作全量成绩。"
+                        if skipped_count else None),
         },
         "samples": samples,
         "error": stderr[-4000:] if returncode != 0 else None,
@@ -1711,7 +1728,7 @@ def main() -> int:
     resource_report = harbor_jobs_dir / harbor_job_name / "resource-preflight.json"
     if params.get("_resource_preflight") and returncode and resource_report.is_file():
         report = load_json(resource_report)
-        if report.get("status") == "failed":
+        if report.get("status") == "failed" and report.get("policy") != "continue_supported_trials":
             failures = [row for row in report["checks"] if row.get("error")]
             message = "本批次资源预检未通过，尚未启动任何新题目：\n" + "\n".join(
                 f"- {row['task']} [{row['phase']}]: {row['error']}" for row in failures)

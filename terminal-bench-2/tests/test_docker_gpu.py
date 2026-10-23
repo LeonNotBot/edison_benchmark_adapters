@@ -134,19 +134,16 @@ def test_preflight_gpu_verifier_and_concurrency(patched, tmp_path):
         preflight.check_job_resources(job)
 
 
-def test_gpu_late_in_queue_fails_before_dispatch_when_driver_missing(patched, tmp_path, monkeypatch):
-    from harbor.job import Job
+def test_gpu_driver_failure_identifies_only_affected_trial(patched, tmp_path, monkeypatch):
     def missing():
         raise RuntimeError("NVIDIA runtime missing")
     monkeypatch.setattr(gpu, "docker_gpu_inventory", missing)
     job = helpers.make_job(tmp_path, {"cpu-first": "", "gpu-last": "[environment]\ngpus=1\n"})
     job.config = SimpleNamespace(n_concurrent_trials=1)
-    async def forbidden(*args):
-        pytest.fail("Submitted trials despite missing GPU runtime")
-    monkeypatch.setattr(Job, "_run_trials_with_queue", forbidden)
-    preflight.patch_job_resource_preflight()
-    with pytest.raises(RuntimeError, match="gpu-last.*NVIDIA runtime missing"):
-        asyncio.run(Job._run_trials_with_queue(job))
+    report = preflight.check_job_resources(job, raise_on_failure=False)
+    assert report["skipped_trials"] == 1 and report["runnable_trials"] == 1
+    assert report["checks"][0]["error"] is None
+    assert "NVIDIA runtime missing" in report["checks"][1]["error"]
 
 
 def test_conflicting_authored_device_requests_rejected(patched, tmp_path):

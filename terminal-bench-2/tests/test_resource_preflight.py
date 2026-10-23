@@ -25,10 +25,14 @@ def make_job(tmp_path, definitions):
             (task_dir / directory / "Dockerfile").write_text("FROM scratch\n")
         trial = TrialConfig(task={"path": task_dir}, agent={"name": "oracle"})
         trials.append(trial)
-        downloads[trial.task.get_task_id()] = SimpleNamespace(path=task_dir)
+        downloads[trial.task.get_task_id()] = SimpleNamespace(path=task_dir, content_hash=None, resolved_git_commit_id=None)
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    return SimpleNamespace(_remaining_trial_configs=trials, _task_download_results=downloads, job_dir=job_dir)
+    from harbor.trial.queue import TrialQueue
+    for trial in trials:
+        trial.trials_dir = job_dir
+    return SimpleNamespace(_remaining_trial_configs=trials, _task_download_results=downloads, job_dir=job_dir,
+                           config=SimpleNamespace(n_concurrent_trials=1), _trial_queue=TrialQueue(1))
 
 
 @pytest.fixture(autouse=True)
@@ -40,19 +44,11 @@ def never_start_containers(monkeypatch):
     monkeypatch.setattr(DockerEnvironment, "start", forbidden)
 
 
-def test_gpu_at_end_blocks_entire_queue_and_reports_all_failures(tmp_path, monkeypatch):
-    from harbor.job import Job
-
+def test_strict_diagnostic_reports_all_resource_failures(tmp_path, monkeypatch):
     job = make_job(tmp_path, {"cpu-first": "", "gpu-last": "[environment]\ngpus=1\n",
                               "gpu-too": "[environment]\ngpus=2\n"})
-    dispatched = []
-    async def dispatch(*args, **kwargs):
-        dispatched.append(True)
-    monkeypatch.setattr(Job, "_run_trials_with_queue", dispatch)
-    preflight.patch_job_resource_preflight()
     with pytest.raises(RuntimeError, match=preflight.MARKER) as exc:
-        asyncio.run(Job._run_trials_with_queue(job))
-    assert not dispatched
+        preflight.check_job_resources(job)
     assert "gpu-last" in str(exc.value) and "gpu-too" in str(exc.value)
     report = json.loads((job.job_dir / preflight.REPORT_NAME).read_text())
     assert report["checked_tasks"] == 3
