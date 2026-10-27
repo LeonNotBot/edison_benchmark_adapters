@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Also supports loading this entry point by file path in offline diagnostics/tests.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trial_diagnostics import classify_api, diagnose_trial
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2"
 SUPPORTED_AGENTS = {"oracle", "hermes", "terminus-2", "claude-code"}
@@ -180,18 +183,16 @@ def truthy(value: Any, default: bool = False) -> bool:
 
 def is_model_rate_limit_error(value: Any) -> bool:
     """Return whether an exception or runner log reports a model-provider 429."""
+    text = str(value or "")
     if isinstance(value, urllib.error.HTTPError) and value.code == 429:
-        return True
-    text = str(value or "").lower()
+        return classify_api(text, 429)[0] != "model_quota_exhausted"
     return any(
-        marker in text
-        for marker in (
-            "ratelimiterror",
-            "temporarily rate-limited upstream",
-            '"code":429',
-            '"code": 429',
-            "upstream_provider_shared_pool",
-        )
+        classify_api(line)[0] != "model_quota_exhausted"
+        and any(marker in line.lower() for marker in (
+            "ratelimiterror", "temporarily rate-limited upstream",
+            '"code":429', '"code": 429', "upstream_provider_shared_pool",
+        ))
+        for line in text.splitlines()
     )
 
 
@@ -1064,7 +1065,9 @@ def harbor_progress(jobs_dir: Path, job_name: str | None = None) -> dict[str, An
         try:
             trial = load_json(trial_result_path)
             exception = trial.get("exception_info") if isinstance(trial.get("exception_info"), dict) else {}
-            if exception:
+            reward = ((trial.get("verifier_result") or {}).get("rewards") or {}).get("reward")
+            diagnosis = diagnose_trial(trial_dir, trial, reward)
+            if exception or diagnosis["execution_error"]:
                 errored_trials.append(trial_dir.name)
             else:
                 completed_trials.append(trial_dir.name)
@@ -1073,11 +1076,12 @@ def harbor_progress(jobs_dir: Path, job_name: str | None = None) -> dict[str, An
                     trial.get("task_id"),
                     str(trial.get("task_name") or trial_dir.name),
                 ),
-                "status": "failed" if exception else "completed",
+                "status": "failed" if exception or diagnosis["execution_error"] else "completed",
                 "finished_at": trial.get("finished_at"),
                 "timings": trial_timing_metrics(trial),
                 "exception_type": exception.get("exception_type"),
                 "exception_message": str(exception.get("exception_message") or "")[:500] or None,
+                "diagnosis": diagnosis,
             })
         except Exception:
             completed_trials.append(trial_dir.name)
@@ -1483,6 +1487,7 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
         reward = 0.0
     duration = seconds_between(trial.get("started_at"), trial.get("finished_at"))
     timings = trial_timing_metrics(trial)
+    diagnosis = diagnose_trial(trial_file.parent, trial, reward)
     output = (
         agent_result.get("message")
         or agent_result.get("output")
@@ -1494,17 +1499,19 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
     return {
         "id": task_id,
         "name": trial.get("task_name") or trial_file.parent.name,
-        "status": "error" if exception_info else "completed",
+        "status": "error" if exception_info or diagnosis["execution_error"] else "completed",
         "score": reward,
         "reward": reward,
         "output": output,
         "latency_seconds": duration,
         "metrics": {
             "trial_name": trial.get("trial_name"),
+            "finished_at": trial.get("finished_at"),
             "source": trial.get("source"),
             "agent_info": trial.get("agent_info"),
             "verifier_result": verifier,
             "timings": timings,
+            "diagnosis": diagnosis,
             "exception_type": exception_info.get("exception_type") if exception_info else None,
             "resource_skipped": resource_skipped,
             "timed_out": bool(
@@ -1512,7 +1519,8 @@ def normalize_trial_result(trial_file: Path) -> dict[str, Any]:
                 and "timeout" in str(exception_info.get("exception_type") or "").lower()
             ),
         },
-        "error": json.dumps(exception_info, ensure_ascii=False, default=str) if exception_info else None,
+        "error": (json.dumps(exception_info, ensure_ascii=False, default=str) if exception_info
+                  else diagnosis["evidence"] if diagnosis["execution_error"] else None),
     }
 
 
